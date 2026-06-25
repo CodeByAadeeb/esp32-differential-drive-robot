@@ -1,0 +1,308 @@
+/* ── Variables ───────────────────────────────────────────── */
+:root {
+  --bg:        #08090c;
+  --panel:     #0d1014;
+  --border:    #1a2a1a;
+  --amber:     #e8a020;
+  --amber-dim: #6a4208;
+  --green:     #3dff70;
+  --green-dim: #1a3a28;
+  --red:       #ff3b3b;
+  --text:      #b8ccb8;
+  --text-dim:  #3a5a3a;
+  --font-mono: 'Share Tech Mono', monospace;
+  --font-disp: 'Orbitron', monospace;
+}
+
+/* ── Reset ───────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* ── Scanlines ───────────────────────────────────────────── */
+.scanlines {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px, transparent 3px,
+    rgba(0,0,0,0.15) 3px, rgba(0,0,0,0.15) 4px
+  );
+}
+
+/* ── App Shell ───────────────────────────────────────────── */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  padding: 12px;
+  gap: 10px;
+  animation: boot 0.4s ease both;
+}
+
+@keyframes boot {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Header ──────────────────────────────────────────────── */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  flex-shrink: 0;
+}
+
+.logo {
+  font-family: var(--font-disp);
+  font-size: 1rem;
+  font-weight: 900;
+  color: var(--amber);
+  letter-spacing: 0.1em;
+  text-shadow: 0 0 16px var(--amber), 0 0 32px rgba(232,160,32,0.25);
+}
+
+.conn-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.conn-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 6px var(--red);
+  transition: background 0.3s, box-shadow 0.3s;
+}
+
+.conn-dot.on {
+  background: var(--green);
+  box-shadow: 0 0 10px var(--green);
+  animation: blink 2s ease-in-out infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
+.conn-label {
+  font-size: 0.62rem;
+  letter-spacing: 0.15em;
+  color: var(--text-dim);
+}
+
+/* ── Telemetry Strip ─────────────────────────────────────── */
+.telemetry {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.telem-cell {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 6px 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.telem-axis {
+  font-family: var(--font-disp);
+  font-size: 0.55rem;
+  color: var(--amber-dim);
+  letter-spacing: 0.1em;
+}
+
+.telem-val {
+  font-size: 0.9rem;
+  color: var(--green);
+  text-shadow: 0 0 8px rgba(61,255,112,0.4);
+  letter-spacing: 0.02em;
+}
+
+.telem-unit {
+  font-size: 0.5rem;
+  color: var(--text-dim);
+}
+
+/* ── D-Pad ───────────────────────────────────────────────── */
+.dpad-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+}
+
+.dpad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  gap: 8px;
+  width: min(80vw, 300px);
+  height: min(80vw, 300px);
+}
+
+/* Grid placement */
+#btnUp    { grid-column: 2; grid-row: 1; }
+#btnLeft  { grid-column: 1; grid-row: 2; }
+#btnStop  { grid-column: 2; grid-row: 2; }
+#btnRight { grid-column: 3; grid-row: 2; }
+#btnDown  { grid-column: 2; grid-row: 3; }
+
+/* ── Button Base ─────────────────────────────────────────── */
+.btn {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.08s ease;
+  -webkit-user-select: none;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-arrow {
+  font-size: 1.4rem;
+  color: var(--text-dim);
+  transition: color 0.08s, text-shadow 0.08s;
+  pointer-events: none;
+}
+
+.btn-lbl {
+  font-family: var(--font-disp);
+  font-size: 0.42rem;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+  transition: color 0.08s;
+  pointer-events: none;
+}
+
+/* Active state - direction buttons */
+.btn-dir.active {
+  border-color: var(--amber);
+  background: rgba(232,160,32,0.08);
+  box-shadow: 0 0 18px rgba(232,160,32,0.25), inset 0 0 10px rgba(232,160,32,0.06);
+  transform: scale(0.94);
+}
+
+.btn-dir.active .btn-arrow,
+.btn-dir.active .btn-lbl {
+  color: var(--amber);
+  text-shadow: 0 0 10px var(--amber);
+}
+
+/* Active state - stop button */
+.btn-stop {
+  border-color: rgba(255,59,59,0.2);
+}
+
+.btn-stop .btn-arrow,
+.btn-stop .btn-lbl {
+  color: rgba(255,59,59,0.4);
+}
+
+.btn-stop.active {
+  border-color: var(--red);
+  background: rgba(255,59,59,0.08);
+  box-shadow: 0 0 18px rgba(255,59,59,0.25);
+  transform: scale(0.94);
+}
+
+.btn-stop.active .btn-arrow,
+.btn-stop.active .btn-lbl {
+  color: var(--red);
+  text-shadow: 0 0 10px var(--red);
+}
+
+/* ── Command Bar ─────────────────────────────────────────── */
+.cmd-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  padding: 7px 12px;
+  flex-shrink: 0;
+}
+
+.cmd-prefix {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+}
+
+.cmd-val {
+  font-family: var(--font-disp);
+  font-size: 0.8rem;
+  color: var(--amber);
+  letter-spacing: 0.2em;
+  text-shadow: 0 0 8px rgba(232,160,32,0.4);
+}
+
+/* ── Reset Button ────────────────────────────────────────── */
+.reset-btn {
+  background: transparent;
+  border: 1px solid var(--amber-dim);
+  color: var(--amber-dim);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  padding: 9px;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: all 0.2s;
+  flex-shrink: 0;
+  width: 100%;
+}
+
+.reset-btn:active {
+  border-color: var(--amber);
+  color: var(--amber);
+  background: rgba(232,160,32,0.06);
+}
+
+/* ── Log ─────────────────────────────────────────────────── */
+.log {
+  flex: 0 0 80px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  scrollbar-width: none;
+}
+
+.log::-webkit-scrollbar { display: none; }
+
+.log-line {
+  font-size: 0.6rem;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+}
+
+.log-info { color: var(--text-dim); }
+.log-ok   { color: var(--green); }
+.log-err  { color: var(--red); }

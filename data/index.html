@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+  <title>RECKONER CONTROL</title>
+  <link rel="stylesheet" href="style.css"/>
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@700;900&display=swap" rel="stylesheet"/>
+</head>
+<body>
+
+  <div class="scanlines"></div>
+
+  <div class="app">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="logo">[RECKONER]</div>
+      <div class="conn-badge">
+        <span class="conn-dot" id="connDot"></span>
+        <span class="conn-label" id="connLabel">OFFLINE</span>
+      </div>
+    </header>
+
+    <!-- Telemetry Strip -->
+    <div class="telemetry">
+      <div class="telem-cell">
+        <span class="telem-axis">X</span>
+        <span class="telem-val" id="tX">0.00</span>
+        <span class="telem-unit">mm</span>
+      </div>
+      <div class="telem-cell">
+        <span class="telem-axis">Y</span>
+        <span class="telem-val" id="tY">0.00</span>
+        <span class="telem-unit">mm</span>
+      </div>
+      <div class="telem-cell">
+        <span class="telem-axis">θ</span>
+        <span class="telem-val" id="tTheta">0.00</span>
+        <span class="telem-unit">°</span>
+      </div>
+      <div class="telem-cell">
+        <span class="telem-axis">D</span>
+        <span class="telem-val" id="tDist">0.00</span>
+        <span class="telem-unit">mm</span>
+      </div>
+    </div>
+
+    <!-- D-Pad -->
+    <div class="dpad-wrap">
+      <div class="dpad">
+
+        <!-- Up -->
+        <button class="btn btn-dir" id="btnUp"
+          data-cmd="FORWARD"
+          ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+          onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+          <span class="btn-arrow">▲</span>
+          <span class="btn-lbl">FWD</span>
+        </button>
+
+        <!-- Middle row -->
+        <button class="btn btn-dir" id="btnLeft"
+          data-cmd="LEFT"
+          ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+          onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+          <span class="btn-arrow">◀</span>
+          <span class="btn-lbl">LEFT</span>
+        </button>
+
+        <button class="btn btn-stop" id="btnStop"
+          data-cmd="STOP"
+          ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+          onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+          <span class="btn-arrow">■</span>
+          <span class="btn-lbl">STOP</span>
+        </button>
+
+        <button class="btn btn-dir" id="btnRight"
+          data-cmd="RIGHT"
+          ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+          onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+          <span class="btn-arrow">▶</span>
+          <span class="btn-lbl">RIGHT</span>
+        </button>
+
+        <!-- Down -->
+        <button class="btn btn-dir" id="btnDown"
+          data-cmd="BACKWARD"
+          ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+          onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+          <span class="btn-arrow">▼</span>
+          <span class="btn-lbl">REV</span>
+        </button>
+
+      </div>
+    </div>
+
+    <!-- Current Command -->
+    <div class="cmd-bar">
+      <span class="cmd-prefix">CMD &gt;</span>
+      <span class="cmd-val" id="cmdVal">IDLE</span>
+    </div>
+
+    <!-- Reset -->
+    <button class="reset-btn" onclick="resetOrigin()">⟳ RESET ORIGIN</button>
+
+    <!-- Log -->
+    <div class="log" id="log">
+      <div class="log-line log-info">&gt; System ready</div>
+    </div>
+
+  </div>
+
+  <script>
+    const WS_URL = 'ws://192.168.4.1:1337';
+    let ws = null;
+
+    function connect() {
+      addLog('Connecting...', 'info');
+      ws = new WebSocket(WS_URL);
+      ws.onopen  = () => { setConn(true);  addLog('Connected', 'ok'); };
+      ws.onclose = () => { setConn(false); addLog('Lost connection. Retrying...', 'err'); setTimeout(connect, 3000); };
+      ws.onerror = () => addLog('WebSocket error', 'err');
+      ws.onmessage = (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          if (d.x     !== undefined) document.getElementById('tX').textContent     = parseFloat(d.x).toFixed(2);
+          if (d.y     !== undefined) document.getElementById('tY').textContent     = parseFloat(d.y).toFixed(2);
+          if (d.theta !== undefined) document.getElementById('tTheta').textContent = parseFloat(d.theta).toFixed(2);
+          if (d.dist  !== undefined) document.getElementById('tDist').textContent  = parseFloat(d.dist).toFixed(2);
+        } catch(err) {
+          addLog('RX: ' + e.data, 'info');
+        }
+      };
+    }
+
+    function send(cmd) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(cmd);
+        document.getElementById('cmdVal').textContent = cmd;
+      }
+    }
+
+    function pressBtn(el) {
+      el.classList.add('active');
+      send(el.dataset.cmd);
+    }
+
+    function releaseBtn(el) {
+      el.classList.remove('active');
+      // Only send STOP if not the stop button itself
+      if (el.dataset.cmd !== 'STOP') {
+        send('STOP');
+        document.getElementById('cmdVal').textContent = 'IDLE';
+      }
+    }
+
+    function resetOrigin() {
+      send('RESET');
+      ['tX','tY','tTheta','tDist'].forEach(id => document.getElementById(id).textContent = '0.00');
+      addLog('Origin reset', 'ok');
+    }
+
+    function setConn(on) {
+      document.getElementById('connDot').classList.toggle('on', on);
+      document.getElementById('connLabel').textContent = on ? 'ONLINE' : 'OFFLINE';
+    }
+
+    function addLog(msg, type) {
+      const log  = document.getElementById('log');
+      const line = document.createElement('div');
+      line.className = 'log-line log-' + type;
+      const ts = new Date().toLocaleTimeString('en-GB', { hour12: false });
+      line.textContent = '[' + ts + '] ' + msg;
+      log.appendChild(line);
+      log.scrollTop = log.scrollHeight;
+      if (log.children.length > 30) log.removeChild(log.firstChild);
+    }
+
+    connect();
+  </script>
+</body>
+</html>
