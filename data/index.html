@@ -16,99 +16,150 @@
     <!-- Header -->
     <header class="header">
       <div class="logo">[RECKONER]</div>
-      <div class="conn-badge">
-        <span class="conn-dot" id="connDot"></span>
-        <span class="conn-label" id="connLabel">OFFLINE</span>
+      <div class="header-right">
+        <button class="map-toggle" id="mapToggleBtn" onclick="toggleMap()">
+          <span class="map-toggle-icon">▦</span> MAP
+        </button>
+        <div class="conn-badge">
+          <span class="conn-dot" id="connDot"></span>
+          <span class="conn-label" id="connLabel">OFFLINE</span>
+        </div>
       </div>
     </header>
 
-    <!-- Telemetry Strip -->
-    <div class="telemetry">
-      <div class="telem-cell">
-        <span class="telem-axis">X</span>
-        <span class="telem-val" id="tX">0.00</span>
-        <span class="telem-unit">mm</span>
+    <!-- Body: map panel + main controls, side-by-side on desktop -->
+    <div class="body-wrap">
+
+      <!-- Top-down Map -->
+      <div class="map-panel" id="mapPanel">
+        <div class="map-header">
+          <span class="map-title">TOP-DOWN PATH</span>
+          <span class="map-scale" id="mapScale">RANGE —</span>
+        </div>
+        <canvas id="mapCanvas"></canvas>
       </div>
-      <div class="telem-cell">
-        <span class="telem-axis">Y</span>
-        <span class="telem-val" id="tY">0.00</span>
-        <span class="telem-unit">mm</span>
-      </div>
-      <div class="telem-cell">
-        <span class="telem-axis">θ</span>
-        <span class="telem-val" id="tTheta">0.00</span>
-        <span class="telem-unit">°</span>
-      </div>
-      <div class="telem-cell">
-        <span class="telem-axis">D</span>
-        <span class="telem-val" id="tDist">0.00</span>
-        <span class="telem-unit">mm</span>
-      </div>
-    </div>
 
-    <!-- D-Pad -->
-    <div class="dpad-wrap">
-      <div class="dpad">
+      <div class="main-col">
 
-        <!-- Up -->
-        <button class="btn btn-dir" id="btnUp"
-          data-cmd="FORWARD"
-          ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
-          onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
-          <span class="btn-arrow">▲</span>
-          <span class="btn-lbl">FWD</span>
-        </button>
+        <!-- Telemetry Strip -->
+        <div class="telemetry">
+          <div class="telem-cell">
+            <span class="telem-axis">X</span>
+            <span class="telem-val" id="tX">0.00</span>
+            <span class="telem-unit">mm</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-axis">Y</span>
+            <span class="telem-val" id="tY">0.00</span>
+            <span class="telem-unit">mm</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-axis">θ</span>
+            <span class="telem-val" id="tTheta">0.00</span>
+            <span class="telem-unit">°</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-axis">D</span>
+            <span class="telem-val" id="tDist">0.00</span>
+            <span class="telem-unit">mm</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-axis">Kp</span>
+            <span class="telem-val" id="tKp">—</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-axis">ERR</span>
+            <span class="telem-val" id="tError">—</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-axis">∫</span>
+            <span class="telem-val" id="tIntegral">—</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-axis">LPWM</span>
+            <span class="telem-val" id="tLpwm">—</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-axis">RPWM</span>
+            <span class="telem-val" id="tRpwm">—</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-axis">ΔR</span>
+            <span class="telem-val" id="tDeltaRight">—</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-axis">ΔL</span>
+            <span class="telem-val" id="tDeltaLeft">—</span>
+          </div>
+        </div>
 
-        <!-- Middle row -->
-        <button class="btn btn-dir" id="btnLeft"
-          data-cmd="LEFT"
-          ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
-          onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
-          <span class="btn-arrow">◀</span>
-          <span class="btn-lbl">LEFT</span>
-        </button>
+        <!-- D-Pad -->
+        <div class="dpad-wrap">
+          <div class="dpad">
 
-        <button class="btn btn-stop" id="btnStop"
-          data-cmd="STOP"
-          ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
-          onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
-          <span class="btn-arrow">■</span>
-          <span class="btn-lbl">STOP</span>
-        </button>
+            <!-- Up -->
+            <button class="btn btn-dir" id="btnUp"
+              data-cmd="FORWARD"
+              ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+              onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+              <span class="btn-arrow">▲</span>
+              <span class="btn-lbl">FWD</span>
+            </button>
 
-        <button class="btn btn-dir" id="btnRight"
-          data-cmd="RIGHT"
-          ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
-          onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
-          <span class="btn-arrow">▶</span>
-          <span class="btn-lbl">RIGHT</span>
-        </button>
+            <!-- Middle row -->
+            <button class="btn btn-dir" id="btnLeft"
+              data-cmd="LEFT"
+              ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+              onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+              <span class="btn-arrow">◀</span>
+              <span class="btn-lbl">LEFT</span>
+            </button>
 
-        <!-- Down -->
-        <button class="btn btn-dir" id="btnDown"
-          data-cmd="BACKWARD"
-          ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
-          onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
-          <span class="btn-arrow">▼</span>
-          <span class="btn-lbl">REV</span>
-        </button>
+            <button class="btn btn-stop" id="btnStop"
+              data-cmd="STOP"
+              ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+              onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+              <span class="btn-arrow">■</span>
+              <span class="btn-lbl">STOP</span>
+            </button>
 
-      </div>
-    </div>
+            <button class="btn btn-dir" id="btnRight"
+              data-cmd="RIGHT"
+              ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+              onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+              <span class="btn-arrow">▶</span>
+              <span class="btn-lbl">RIGHT</span>
+            </button>
 
-    <!-- Current Command -->
-    <div class="cmd-bar">
-      <span class="cmd-prefix">CMD &gt;</span>
-      <span class="cmd-val" id="cmdVal">IDLE</span>
-    </div>
+            <!-- Down -->
+            <button class="btn btn-dir" id="btnDown"
+              data-cmd="BACKWARD"
+              ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+              onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+              <span class="btn-arrow">▼</span>
+              <span class="btn-lbl">REV</span>
+            </button>
 
-    <!-- Reset -->
-    <button class="reset-btn" onclick="resetOrigin()">⟳ RESET ORIGIN</button>
+          </div>
+        </div>
 
-    <!-- Log -->
-    <div class="log" id="log">
-      <div class="log-line log-info">&gt; System ready</div>
-    </div>
+        <!-- Current Command -->
+        <div class="cmd-bar">
+          <span class="cmd-prefix">CMD &gt;</span>
+          <span class="cmd-val" id="cmdVal">IDLE</span>
+        </div>
+
+        <!-- Reset -->
+        <button class="reset-btn" onclick="resetOrigin()">⟳ RESET ORIGIN</button>
+
+        <!-- Log -->
+        <div class="log" id="log">
+          <div class="log-line log-info">&gt; System ready</div>
+        </div>
+
+      </div><!-- /main-col -->
+
+    </div><!-- /body-wrap -->
 
   </div>
 
@@ -116,6 +167,139 @@
     const WS_URL = 'ws://192.168.4.1:1337';
     let ws = null;
 
+    // ── Map state ────────────────────────────────────────────
+    const mapCanvas   = document.getElementById('mapCanvas');
+    const mapCtx      = mapCanvas.getContext('2d');
+    const mapScaleLbl = document.getElementById('mapScale');
+    const mapPanel    = document.getElementById('mapPanel');
+    const mapToggleBtn = document.getElementById('mapToggleBtn');
+
+    let pathHistory = [];   // {x, y} in mm, robot frame
+    let lastTheta   = 0;    // degrees
+    let mapOpen     = false;
+    const MAX_POINTS = 3000;
+    const DESKTOP_BREAKPOINT = 700;
+
+    function isDesktopLayout() {
+      return window.innerWidth >= DESKTOP_BREAKPOINT;
+    }
+
+    function toggleMap() {
+      mapOpen = !mapOpen;
+      mapPanel.classList.toggle('open', mapOpen);
+      mapToggleBtn.classList.toggle('active', mapOpen);
+      if (mapOpen) requestAnimationFrame(resizeMapCanvas);
+    }
+
+    function resizeMapCanvas() {
+      const rect = mapCanvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const dpr = window.devicePixelRatio || 1;
+      mapCanvas.width  = rect.width  * dpr;
+      mapCanvas.height = rect.height * dpr;
+      mapCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawMap();
+    }
+
+    function shouldDraw() {
+      return mapOpen || isDesktopLayout();
+    }
+
+    function drawMap() {
+      const w = mapCanvas.clientWidth;
+      const h = mapCanvas.clientHeight;
+      if (!w || !h) return;
+      mapCtx.clearRect(0, 0, w, h);
+
+      const cx = w / 2, cy = h / 2;
+
+      // Auto-scale: fit the furthest excursion in either axis, with a floor
+      // so we don't zoom in crazily on the first couple of readings.
+      let maxExtent = 100; // mm
+      for (const p of pathHistory) {
+        if (Math.abs(p.x) > maxExtent) maxExtent = Math.abs(p.x);
+        if (Math.abs(p.y) > maxExtent) maxExtent = Math.abs(p.y);
+      }
+      const margin = 22;
+      const scale = (Math.min(w, h) / 2 - margin) / maxExtent;
+      mapScaleLbl.textContent = 'RANGE ' + Math.round(maxExtent * 2) + 'mm';
+
+      // Screen mapping: forward (+X) = up, left (+Y) = left
+      const toScreen = (rx, ry) => ({
+        sx: cx - ry * scale,
+        sy: cy - rx * scale
+      });
+
+      // Crosshair through origin
+      mapCtx.strokeStyle = 'rgba(58,90,58,0.4)';
+      mapCtx.lineWidth = 1;
+      mapCtx.beginPath();
+      mapCtx.moveTo(cx, 0); mapCtx.lineTo(cx, h);
+      mapCtx.moveTo(0, cy); mapCtx.lineTo(w, cy);
+      mapCtx.stroke();
+
+      // Origin marker
+      mapCtx.fillStyle = '#e8a020';
+      mapCtx.beginPath();
+      mapCtx.arc(cx, cy, 4, 0, Math.PI * 2);
+      mapCtx.fill();
+
+      // Path
+      if (pathHistory.length > 1) {
+        mapCtx.strokeStyle = '#3dff70';
+        mapCtx.lineWidth = 1.5;
+        mapCtx.shadowColor = 'rgba(61,255,112,0.5)';
+        mapCtx.shadowBlur = 4;
+        mapCtx.beginPath();
+        const first = toScreen(pathHistory[0].x, pathHistory[0].y);
+        mapCtx.moveTo(first.sx, first.sy);
+        for (let i = 1; i < pathHistory.length; i++) {
+          const p = toScreen(pathHistory[i].x, pathHistory[i].y);
+          mapCtx.lineTo(p.sx, p.sy);
+        }
+        mapCtx.stroke();
+        mapCtx.shadowBlur = 0;
+      }
+
+      // Current position + heading arrow
+      if (pathHistory.length > 0) {
+        const last = pathHistory[pathHistory.length - 1];
+        const pos  = toScreen(last.x, last.y);
+        const rad  = lastTheta * Math.PI / 180;
+        const arrowLen = 14;
+        const tipX = pos.sx - Math.sin(rad) * arrowLen;
+        const tipY = pos.sy - Math.cos(rad) * arrowLen;
+
+        mapCtx.strokeStyle = '#e8a020';
+        mapCtx.lineWidth = 2;
+        mapCtx.beginPath();
+        mapCtx.moveTo(pos.sx, pos.sy);
+        mapCtx.lineTo(tipX, tipY);
+        mapCtx.stroke();
+
+        const headAngle = 0.5, headLen = 5;
+        mapCtx.beginPath();
+        mapCtx.moveTo(tipX, tipY);
+        mapCtx.lineTo(tipX - Math.sin(rad + Math.PI - headAngle) * headLen,
+                      tipY - Math.cos(rad + Math.PI - headAngle) * headLen);
+        mapCtx.moveTo(tipX, tipY);
+        mapCtx.lineTo(tipX - Math.sin(rad + Math.PI + headAngle) * headLen,
+                      tipY - Math.cos(rad + Math.PI + headAngle) * headLen);
+        mapCtx.stroke();
+
+        mapCtx.fillStyle = '#3dff70';
+        mapCtx.beginPath();
+        mapCtx.arc(pos.sx, pos.sy, 3, 0, Math.PI * 2);
+        mapCtx.fill();
+      }
+    }
+
+    window.addEventListener('resize', () => {
+      mapToggleBtn.style.display = isDesktopLayout() ? 'none' : '';
+      if (shouldDraw()) resizeMapCanvas();
+    });
+
+    // ── WebSocket ────────────────────────────────────────────
     function connect() {
       addLog('Connecting...', 'info');
       ws = new WebSocket(WS_URL);
@@ -123,15 +307,32 @@
       ws.onclose = () => { setConn(false); addLog('Lost connection. Retrying...', 'err'); setTimeout(connect, 3000); };
       ws.onerror = () => addLog('WebSocket error', 'err');
       ws.onmessage = (e) => {
-        try {
-          const d = JSON.parse(e.data);
-          if (d.x     !== undefined) document.getElementById('tX').textContent     = parseFloat(d.x).toFixed(2);
-          if (d.y     !== undefined) document.getElementById('tY').textContent     = parseFloat(d.y).toFixed(2);
-          if (d.theta !== undefined) document.getElementById('tTheta').textContent = parseFloat(d.theta).toFixed(2);
-          if (d.dist  !== undefined) document.getElementById('tDist').textContent  = parseFloat(d.dist).toFixed(2);
-        } catch(err) {
-          addLog('RX: ' + e.data, 'info');
-        }
+          try {
+              const d = JSON.parse(e.data);
+              if (d.x         !== undefined) document.getElementById('tX').textContent         = parseFloat(d.x).toFixed(2);
+              if (d.y         !== undefined) document.getElementById('tY').textContent         = parseFloat(d.y).toFixed(2);
+              if (d.theta     !== undefined) document.getElementById('tTheta').textContent     = parseFloat(d.theta).toFixed(2);
+              if (d.dist      !== undefined) document.getElementById('tDist').textContent      = parseFloat(d.dist).toFixed(2);
+              if (d.kp        !== undefined) document.getElementById('tKp').textContent        = d.kp;
+              if (d.error     !== undefined) document.getElementById('tError').textContent     = d.error;
+              if (d.integral  !== undefined) document.getElementById('tIntegral').textContent  = d.integral;
+              if (d.lpwm      !== undefined) document.getElementById('tLpwm').textContent      = d.lpwm;
+              if (d.rpwm      !== undefined) document.getElementById('tRpwm').textContent      = d.rpwm;
+              if (d.delta_right !== undefined) document.getElementById('tDeltaRight').textContent = d.delta_right;
+              if (d.delta_left  !== undefined) document.getElementById('tDeltaLeft').textContent  = d.delta_left;
+
+              // Map update
+              if (d.x !== undefined && d.y !== undefined) {
+                pathHistory.push({ x: parseFloat(d.x), y: parseFloat(d.y) });
+                if (pathHistory.length > MAX_POINTS) pathHistory.shift();
+                if (d.theta !== undefined) lastTheta = parseFloat(d.theta);
+                if (shouldDraw()) drawMap();
+              }
+
+              console.log(`${Date.now()},${d.error},${d.integral},${d.lpwm},${d.rpwm},${d.delta_left},${d.delta_right}`);
+          } catch(err) {
+              addLog('RX: ' + e.data, 'info');
+          }
       };
     }
 
@@ -159,6 +360,9 @@
     function resetOrigin() {
       send('RESET');
       ['tX','tY','tTheta','tDist'].forEach(id => document.getElementById(id).textContent = '0.00');
+      pathHistory = [];
+      lastTheta = 0;
+      if (shouldDraw()) drawMap();
       addLog('Origin reset', 'ok');
     }
 
@@ -177,6 +381,10 @@
       log.scrollTop = log.scrollHeight;
       if (log.children.length > 30) log.removeChild(log.firstChild);
     }
+
+    // Initial setup
+    mapToggleBtn.style.display = isDesktopLayout() ? 'none' : '';
+    if (isDesktopLayout()) requestAnimationFrame(resizeMapCanvas);
 
     connect();
   </script>
