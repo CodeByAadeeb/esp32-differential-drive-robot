@@ -1,0 +1,31 @@
+{
+	"folders": [
+		{
+			"name": "autonomous robot",
+			"path": ".."
+		}
+	],
+	"settings": {
+		"ROS2.distro": "jazzy",
+		"python.autoComplete.extraPaths": [
+			"/home/codebyaadeeb/master_ros2_ws/install/rosbot_description/lib/python3.12/site-packages",
+			"/home/codebyaadeeb/master_ros2_ws/install/master_ros2_interface/lib/python3.12/site-packages",
+			"/home/codebyaadeeb/my_robot_ws/install/yolov8_msgs/lib/python3.12/site-packages",
+			"/home/codebyaadeeb/my_robot_ws/install/yolobot_recognition/lib/python3.12/site-packages",
+			"/home/codebyaadeeb/my_robot_ws/install/yolo_ros/lib/python3.12/site-packages",
+			"/home/codebyaadeeb/my_robot_ws/install/yolo_msgs/lib/python3.12/site-packages",
+			"/home/codebyaadeeb/yolobot/install/yolov8_msgs/lib/python3.12/site-packages",
+			"/opt/ros/jazzy/lib/python3.12/site-packages"
+		],
+		"python.analysis.extraPaths": [
+			"/home/codebyaadeeb/master_ros2_ws/install/rosbot_description/lib/python3.12/site-packages",
+			"/home/codebyaadeeb/master_ros2_ws/install/master_ros2_interface/lib/python3.12/site-packages",
+			"/home/codebyaadeeb/my_robot_ws/install/yolov8_msgs/lib/python3.12/site-packages",
+			"/home/codebyaadeeb/my_robot_ws/install/yolobot_recognition/lib/python3.12/site-packages",
+			"/home/codebyaadeeb/my_robot_ws/install/yolo_ros/lib/python3.12/site-packages",
+			"/home/codebyaadeeb/my_robot_ws/install/yolo_msgs/lib/python3.12/site-packages",
+			"/home/codebyaadeeb/yolobot/install/yolov8_msgs/lib/python3.12/site-packages",
+			"/opt/ros/jazzy/lib/python3.12/site-packages"
+		]
+	}
+}

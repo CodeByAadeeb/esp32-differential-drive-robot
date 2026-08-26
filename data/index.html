@@ -64,6 +64,16 @@
             <span class="telem-unit">mm</span>
           </div>
           <div class="telem-cell">
+            <span class="telem-axis">Xₛ</span>
+            <span class="telem-val" id="tXScan">0.00</span>
+            <span class="telem-unit">mm</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-axis">Yₛ</span>
+            <span class="telem-val" id="tYScan">0.00</span>
+            <span class="telem-unit">mm</span>
+          </div>
+          <div class="telem-cell">
             <span class="telem-axis">Kp</span>
             <span class="telem-val" id="tKp">—</span>
           </div>
@@ -90,6 +100,10 @@
           <div class="telem-cell">
             <span class="telem-axis">ΔL</span>
             <span class="telem-val" id="tDeltaLeft">—</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-axis">VL53</span>
+            <span class="telem-val" id="tVL53">—</span>
           </div>
         </div>
 
@@ -164,17 +178,37 @@
   </div>
 
   <script>
-    const WS_URL = 'ws://192.168.4.1:1337';
+    const WS_URL = 'ws://10.24.150.23:8765';  // ← Python server IP:port
     let ws = null;
 
+    // ── Tunable debug thresholds (adjust these while tuning PID) ──
+    const ERROR_WARN_THRESHOLD = 150;   // flag |error| above this as a likely overshoot
+    const PWM_SATURATION       = 250;   // flag LPWM/RPWM near max (assumes ~0-255 range)
+    const SWEEP_VARIANCE_WARN  = 15;    // mm — if a whole SCAN sweep barely changes, servo probably isn't rotating
+
     // ── Map state ────────────────────────────────────────────
-    const mapCanvas   = document.getElementById('mapCanvas');
-    const mapCtx      = mapCanvas.getContext('2d');
-    const mapScaleLbl = document.getElementById('mapScale');
-    const mapPanel    = document.getElementById('mapPanel');
+    const mapCanvas    = document.getElementById('mapCanvas');
+    const mapCtx       = mapCanvas.getContext('2d');
+    const mapScaleLbl  = document.getElementById('mapScale');
+    const mapPanel     = document.getElementById('mapPanel');
     const mapToggleBtn = document.getElementById('mapToggleBtn');
 
-    let pathHistory = [];   // {x, y} in mm, robot frame
+    let pathHistory    = [];   // {x, y} mm — raw encoder/odometry trail (green line)
+    let obstaclePoints = [];   // {x, y} reserved for future obstacle-only messages
+    let liveScanTrail  = [];   // {x, y} — trailing buffer of the single live x_scan/y_scan point (blue)
+    let sweepHistory   = [];   // [{points:[{x,y}...], gen:number}] — one entry per completed SCAN sweep (green, fades with age)
+    let sweepGenCounter = 0;
+
+    // Pose-graph (visual SLAM) state — populated by TRAJECTORY_UPDATE messages
+    let poseGraphNodes  = [];  // [{id, x, y, theta}, ...] most recent optimized trajectory
+    let loopEdge        = null; // {from, to} ids of the keyframe pair that just closed the loop
+    let loopFlashUntil  = 0;   // performance.now() timestamp; while now < this, flash the pose graph
+    let flashLoopRunning = false;
+
+    const MAX_SWEEPS       = 30;    // how many past SCAN sweeps to keep on screen (fading)
+    const MAX_LIVE_TRAIL   = 12;    // how many live single-point scan dots to keep
+    const MAX_SENSOR_RANGE = 1000;  // ignore readings beyond 1000mm (noise/out of range)
+    const MIN_SENSOR_RANGE = 20;    // ignore readings below 20mm (too close, likely invalid)
     let lastTheta   = 0;    // degrees
     let mapOpen     = false;
     const MAX_POINTS = 3000;
@@ -205,6 +239,25 @@
       return mapOpen || isDesktopLayout();
     }
 
+    // ── Legend so the four point colors are self-explanatory ──
+    function ensureLegend() {
+      if (document.getElementById('mapLegend')) return;
+      const legend = document.createElement('div');
+      legend.id = 'mapLegend';
+      legend.style.cssText = 'position:absolute;top:6px;right:8px;font:10px monospace;' +
+        'color:#cfe;background:rgba(0,0,0,0.45);padding:4px 6px;border-radius:4px;' +
+        'line-height:1.6;pointer-events:none;z-index:5;white-space:nowrap;';
+      legend.innerHTML =
+        '<span style="color:#3dff70">●</span> odometry &nbsp;' +
+        '<span style="color:#4da6ff">●</span> live scan &nbsp;' +
+        '<span style="color:#00ff66">●</span> ToF sweep &nbsp;' +
+        '<span style="color:#ff33e6">●</span> pose graph';
+      if (getComputedStyle(mapPanel).position === 'static') {
+        mapPanel.style.position = 'relative';
+      }
+      mapPanel.appendChild(legend);
+    }
+
     function drawMap() {
       const w = mapCanvas.clientWidth;
       const h = mapCanvas.clientHeight;
@@ -216,10 +269,16 @@
       // Auto-scale: fit the furthest excursion in either axis, with a floor
       // so we don't zoom in crazily on the first couple of readings.
       let maxExtent = 100; // mm
-      for (const p of pathHistory) {
+      const track = (p) => {
         if (Math.abs(p.x) > maxExtent) maxExtent = Math.abs(p.x);
         if (Math.abs(p.y) > maxExtent) maxExtent = Math.abs(p.y);
-      }
+      };
+      for (const p of pathHistory) track(p);
+      for (const p of obstaclePoints) track(p);
+      for (const p of liveScanTrail) track(p);
+      for (const s of sweepHistory) for (const p of s.points) track(p);
+      for (const n of poseGraphNodes) track(n);
+
       const margin = 22;
       const scale = (Math.min(w, h) / 2 - margin) / maxExtent;
       mapScaleLbl.textContent = 'RANGE ' + Math.round(maxExtent * 2) + 'mm';
@@ -244,7 +303,7 @@
       mapCtx.arc(cx, cy, 4, 0, Math.PI * 2);
       mapCtx.fill();
 
-      // Path
+      // Raw encoder/odometry path
       if (pathHistory.length > 1) {
         mapCtx.strokeStyle = '#3dff70';
         mapCtx.lineWidth = 1.5;
@@ -259,6 +318,102 @@
         }
         mapCtx.stroke();
         mapCtx.shadowBlur = 0;
+      }
+
+      // Obstacle points (reserved — currently no message type populates this)
+      if (obstaclePoints.length > 0) {
+        mapCtx.fillStyle = '#ff3b3b';
+        for (const p of obstaclePoints) {
+          const s = toScreen(p.x, p.y);
+          mapCtx.beginPath();
+          mapCtx.arc(s.sx, s.sy, 2, 0, Math.PI * 2);
+          mapCtx.fill();
+        }
+      }
+
+      // Completed ToF sweeps — one full SCAN batch each, older ones fade out
+      if (sweepHistory.length > 0) {
+        const newestGen = sweepHistory[sweepHistory.length - 1].gen;
+        for (const sweep of sweepHistory) {
+          const age = newestGen - sweep.gen; // 0 = newest
+          mapCtx.globalAlpha = Math.max(0.15, 1 - age * 0.12);
+          mapCtx.fillStyle = '#00ff66';
+          for (const p of sweep.points) {
+            const s = toScreen(p.x, p.y);
+            mapCtx.beginPath();
+            mapCtx.arc(s.sx, s.sy, 2.5, 0, Math.PI * 2);
+            mapCtx.fill();
+          }
+        }
+        mapCtx.globalAlpha = 1;
+      }
+
+      // Live single-point scan (direct x_scan/y_scan from the telemetry stream)
+      if (liveScanTrail.length > 0) {
+        for (let i = 0; i < liveScanTrail.length; i++) {
+          const p = liveScanTrail[i];
+          const isLatest = i === liveScanTrail.length - 1;
+          const s = toScreen(p.x, p.y);
+          mapCtx.globalAlpha = isLatest ? 1 : 0.35;
+          mapCtx.fillStyle = '#4da6ff';
+          mapCtx.beginPath();
+          mapCtx.arc(s.sx, s.sy, isLatest ? 4 : 2, 0, Math.PI * 2);
+          mapCtx.fill();
+        }
+        mapCtx.globalAlpha = 1;
+      }
+
+      // Pose-graph trajectory (visual SLAM) — corrected whenever a loop closure lands
+      if (poseGraphNodes.length > 0) {
+        const flashing = performance.now() < loopFlashUntil;
+        mapCtx.strokeStyle = flashing ? '#ffffff' : '#ff33e6';
+        mapCtx.lineWidth = flashing ? 3 : 1.5;
+        mapCtx.shadowColor = 'rgba(255,51,230,0.7)';
+        mapCtx.shadowBlur = flashing ? 10 : 3;
+        mapCtx.beginPath();
+        const first = toScreen(poseGraphNodes[0].x, poseGraphNodes[0].y);
+        mapCtx.moveTo(first.sx, first.sy);
+        for (let i = 1; i < poseGraphNodes.length; i++) {
+          const p = toScreen(poseGraphNodes[i].x, poseGraphNodes[i].y);
+          mapCtx.lineTo(p.sx, p.sy);
+        }
+        mapCtx.stroke();
+        mapCtx.shadowBlur = 0;
+
+        mapCtx.fillStyle = '#ff33e6';
+        for (const n of poseGraphNodes) {
+          const s = toScreen(n.x, n.y);
+          mapCtx.fillRect(s.sx - 2.5, s.sy - 2.5, 5, 5);
+        }
+
+        // Highlight the specific loop-closure edge (drawn as a straight dashed line
+        // between the two matched keyframes, independent of trajectory order)
+        if (loopEdge) {
+          const nodeA = poseGraphNodes.find(n => n.id === loopEdge.from);
+          const nodeB = poseGraphNodes.find(n => n.id === loopEdge.to);
+          if (nodeA && nodeB) {
+            const a = toScreen(nodeA.x, nodeA.y);
+            const b = toScreen(nodeB.x, nodeB.y);
+            mapCtx.save();
+            mapCtx.strokeStyle = '#ffee00';
+            mapCtx.lineWidth = 2;
+            mapCtx.setLineDash([4, 4]);
+            mapCtx.shadowColor = 'rgba(255,238,0,0.8)';
+            mapCtx.shadowBlur = flashing ? 8 : 2;
+            mapCtx.beginPath();
+            mapCtx.moveTo(a.sx, a.sy);
+            mapCtx.lineTo(b.sx, b.sy);
+            mapCtx.stroke();
+            mapCtx.restore();
+
+            mapCtx.fillStyle = '#ffee00';
+            [a, b].forEach(s => {
+              mapCtx.beginPath();
+              mapCtx.arc(s.sx, s.sy, 4, 0, Math.PI * 2);
+              mapCtx.fill();
+            });
+          }
+        }
       }
 
       // Current position + heading arrow
@@ -294,6 +449,20 @@
       }
     }
 
+    function startFlashLoop() {
+      if (flashLoopRunning) return;
+      flashLoopRunning = true;
+      const step = () => {
+        if (shouldDraw()) drawMap();
+        if (performance.now() < loopFlashUntil) {
+          requestAnimationFrame(step);
+        } else {
+          flashLoopRunning = false;
+        }
+      };
+      requestAnimationFrame(step);
+    }
+
     window.addEventListener('resize', () => {
       mapToggleBtn.style.display = isDesktopLayout() ? 'none' : '';
       if (shouldDraw()) resizeMapCanvas();
@@ -307,33 +476,153 @@
       ws.onclose = () => { setConn(false); addLog('Lost connection. Retrying...', 'err'); setTimeout(connect, 3000); };
       ws.onerror = () => addLog('WebSocket error', 'err');
       ws.onmessage = (e) => {
-          try {
-              const d = JSON.parse(e.data);
-              if (d.x         !== undefined) document.getElementById('tX').textContent         = parseFloat(d.x).toFixed(2);
-              if (d.y         !== undefined) document.getElementById('tY').textContent         = parseFloat(d.y).toFixed(2);
-              if (d.theta     !== undefined) document.getElementById('tTheta').textContent     = parseFloat(d.theta).toFixed(2);
-              if (d.dist      !== undefined) document.getElementById('tDist').textContent      = parseFloat(d.dist).toFixed(2);
-              if (d.kp        !== undefined) document.getElementById('tKp').textContent        = d.kp;
-              if (d.error     !== undefined) document.getElementById('tError').textContent     = d.error;
-              if (d.integral  !== undefined) document.getElementById('tIntegral').textContent  = d.integral;
-              if (d.lpwm      !== undefined) document.getElementById('tLpwm').textContent      = d.lpwm;
-              if (d.rpwm      !== undefined) document.getElementById('tRpwm').textContent      = d.rpwm;
-              if (d.delta_right !== undefined) document.getElementById('tDeltaRight').textContent = d.delta_right;
-              if (d.delta_left  !== undefined) document.getElementById('tDeltaLeft').textContent  = d.delta_left;
+        let d;
+        try {
+          d = JSON.parse(e.data);
+        } catch (err) {
+          addLog('RX: ' + e.data, 'info');
+          return;
+        }
 
-              // Map update
-              if (d.x !== undefined && d.y !== undefined) {
-                pathHistory.push({ x: parseFloat(d.x), y: parseFloat(d.y) });
-                if (pathHistory.length > MAX_POINTS) pathHistory.shift();
-                if (d.theta !== undefined) lastTheta = parseFloat(d.theta);
-                if (shouldDraw()) drawMap();
-              }
-
-              console.log(`${Date.now()},${d.error},${d.integral},${d.lpwm},${d.rpwm},${d.delta_left},${d.delta_right}`);
-          } catch(err) {
-              addLog('RX: ' + e.data, 'info');
-          }
+        if (d.type === 'SCAN' && Array.isArray(d.measure)) {
+          handleScanSweep(d);
+        } else if (d.type === 'TRAJECTORY_UPDATE' && Array.isArray(d.keyframes)) {
+          handleTrajectoryUpdate(d);
+        } else {
+          handleTelemetry(d);
+        }
       };
+    }
+
+    // Regular per-tick telemetry: x, y, theta, dist, kp, error, integral, lpwm, rpwm,
+    // delta_left, delta_right, measure (single VL53 reading), x_scan/y_scan (live point).
+    function handleTelemetry(d) {
+      if (d.x           !== undefined) document.getElementById('tX').textContent           = parseFloat(d.x).toFixed(2);
+      if (d.y           !== undefined) document.getElementById('tY').textContent           = parseFloat(d.y).toFixed(2);
+      if (d.theta       !== undefined) document.getElementById('tTheta').textContent       = parseFloat(d.theta).toFixed(2);
+      if (d.dist        !== undefined) document.getElementById('tDist').textContent        = parseFloat(d.dist).toFixed(2);
+      if (d.kp          !== undefined) document.getElementById('tKp').textContent          = d.kp;
+      if (d.error       !== undefined) document.getElementById('tError').textContent       = d.error;
+      if (d.integral    !== undefined) document.getElementById('tIntegral').textContent    = d.integral;
+      if (d.lpwm        !== undefined) document.getElementById('tLpwm').textContent        = d.lpwm;
+      if (d.rpwm        !== undefined) document.getElementById('tRpwm').textContent        = d.rpwm;
+      if (d.delta_right !== undefined) document.getElementById('tDeltaRight').textContent = d.delta_right;
+      if (d.delta_left  !== undefined) document.getElementById('tDeltaLeft').textContent  = d.delta_left;
+      if (d.x_scan      !== undefined) document.getElementById('tXScan').textContent      = parseFloat(d.x_scan).toFixed(2);
+      if (d.y_scan      !== undefined) document.getElementById('tYScan').textContent      = parseFloat(d.y_scan).toFixed(2);
+      // A single scalar VL53 reading only — never an array (arrays are SCAN messages, handled separately)
+      if (d.measure !== undefined && !Array.isArray(d.measure)) {
+        document.getElementById('tVL53').textContent = d.measure;
+      }
+
+      // Path tracking (raw odometry)
+      if (d.x !== undefined && d.y !== undefined) {
+        pathHistory.push({ x: parseFloat(d.x), y: parseFloat(d.y) });
+        if (pathHistory.length > MAX_POINTS) pathHistory.shift();
+        if (d.theta !== undefined) lastTheta = parseFloat(d.theta);
+      }
+
+      // Live single-point scan (blue) — the ESP32's own current-angle TOF projection
+      if (d.x_scan !== undefined && d.y_scan !== undefined) {
+        const sx = parseFloat(d.x_scan);
+        const sy = parseFloat(d.y_scan);
+        if (Math.abs(sx) < 5000 && Math.abs(sy) < 5000) {
+          liveScanTrail.push({ x: sx, y: sy });
+          if (liveScanTrail.length > MAX_LIVE_TRAIL) liveScanTrail.shift();
+        }
+      }
+
+      logTelemetry(d);
+
+      if (shouldDraw()) drawMap();
+    }
+
+    // Full ToF sweep batch — one message per completed sweep of the servo
+    function handleScanSweep(d) {
+      const rx = parseFloat(d.x);
+      const ry = parseFloat(d.y);
+      const rThetaRad = parseFloat(d.theta) * (Math.PI / 180.0);
+      const measures = d.measure;
+      const stepAngle = Math.PI / (measures.length - 1); // spread across 0..180°
+
+      const points = [];
+      let minM = Infinity, maxM = -Infinity;
+      measures.forEach((dist, i) => {
+        if (dist > MIN_SENSOR_RANGE && dist < MAX_SENSOR_RANGE) {
+          if (dist < minM) minM = dist;
+          if (dist > maxM) maxM = dist;
+          const servoAngle = (i * stepAngle) - (Math.PI / 2);
+          const worldAngle = rThetaRad + servoAngle;
+          points.push({
+            x: rx + dist * Math.cos(worldAngle),
+            y: ry + dist * Math.sin(worldAngle)
+          });
+        }
+      });
+
+      sweepGenCounter++;
+      sweepHistory.push({ points, gen: sweepGenCounter });
+      if (sweepHistory.length > MAX_SWEEPS) sweepHistory.shift();
+
+      console.groupCollapsed(`[SCAN] sweep #${sweepGenCounter} — ${points.length}/${measures.length} valid pts`);
+      console.log('pose:', { x: rx, y: ry, theta: parseFloat(d.theta) });
+      console.log('range:', { min: minM, max: maxM, spread: (maxM - minM).toFixed(1) });
+      console.groupEnd();
+
+      // If distance barely varies across the whole sweep, the servo probably isn't rotating —
+      // the arc you see is real math, just fed a near-constant distance at every angle.
+      if (isFinite(minM) && isFinite(maxM) && (maxM - minM) < SWEEP_VARIANCE_WARN) {
+        console.warn(`⚠ [SCAN] Sweep #${sweepGenCounter} range barely changes (Δ=${(maxM - minM).toFixed(1)}mm) — check that the servo is actually sweeping.`);
+      }
+
+      if (shouldDraw()) drawMap();
+    }
+
+    // Pose-graph optimization result — sent only when a loop closure was just detected & solved
+    function handleTrajectoryUpdate(d) {
+      poseGraphNodes = d.keyframes.map(k => ({
+        id: k.id, x: parseFloat(k.x), y: parseFloat(k.y), theta: parseFloat(k.theta)
+      }));
+      loopEdge = (d.loop_from !== undefined && d.loop_to !== undefined)
+        ? { from: d.loop_from, to: d.loop_to }
+        : null;
+      loopFlashUntil = performance.now() + 1500;
+
+      console.groupCollapsed(`🔁 [LOOP CLOSURE] Pose graph re-optimized — ${poseGraphNodes.length} keyframes`);
+      if (loopEdge) console.log('closed edge:', loopEdge);
+      console.table(poseGraphNodes);
+      console.groupEnd();
+
+      startFlashLoop();
+      if (shouldDraw()) drawMap();
+    }
+
+    // Structured console output for live PID tuning — one row per telemetry tick
+    function logTelemetry(d) {
+      const row = {
+        x: fmt(d.x), y: fmt(d.y), theta: fmt(d.theta), dist: fmt(d.dist),
+        kp: d.kp, error: d.error, integral: d.integral,
+        lpwm: d.lpwm, rpwm: d.rpwm,
+        delta_left: d.delta_left, delta_right: d.delta_right,
+        x_scan: fmt(d.x_scan), y_scan: fmt(d.y_scan),
+        vl53: Array.isArray(d.measure) ? undefined : d.measure
+      };
+      console.table(row);
+
+      const errAbs = Math.abs(parseFloat(d.error));
+      if (!Number.isNaN(errAbs) && errAbs > ERROR_WARN_THRESHOLD) {
+        console.warn(`⚠ Large PID error: ${d.error} (Kp=${d.kp}) → LPWM=${d.lpwm} RPWM=${d.rpwm}`);
+      }
+      const lp = Math.abs(parseFloat(d.lpwm));
+      const rp = Math.abs(parseFloat(d.rpwm));
+      if ((!Number.isNaN(lp) && lp >= PWM_SATURATION) || (!Number.isNaN(rp) && rp >= PWM_SATURATION)) {
+        console.warn(`⚠ PWM near saturation — L:${d.lpwm} R:${d.rpwm} (error=${d.error})`);
+      }
+    }
+
+    function fmt(v) {
+      const n = parseFloat(v);
+      return Number.isNaN(n) ? v : n.toFixed(2);
     }
 
     function send(cmd) {
@@ -359,8 +648,14 @@
 
     function resetOrigin() {
       send('RESET');
-      ['tX','tY','tTheta','tDist'].forEach(id => document.getElementById(id).textContent = '0.00');
+      ['tX','tY','tTheta','tDist','tXScan','tYScan'].forEach(id => document.getElementById(id).textContent = '0.00');
       pathHistory = [];
+      obstaclePoints = [];
+      liveScanTrail = [];
+      sweepHistory = [];
+      sweepGenCounter = 0;
+      poseGraphNodes = [];
+      loopEdge = null;
       lastTheta = 0;
       if (shouldDraw()) drawMap();
       addLog('Origin reset', 'ok');
@@ -384,6 +679,7 @@
 
     // Initial setup
     mapToggleBtn.style.display = isDesktopLayout() ? 'none' : '';
+    ensureLegend();
     if (isDesktopLayout()) requestAnimationFrame(resizeMapCanvas);
 
     connect();
