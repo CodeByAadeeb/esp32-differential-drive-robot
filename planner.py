@@ -44,6 +44,7 @@ import websockets
 import gtsam
 from gtsam import Pose2
 from gtsam.symbol_shorthand import X
+from collections import deque
 
 # ── Constants ────────────────────────────────────────────────────────────
 PYTHON_WS_PORT = 8765
@@ -104,19 +105,27 @@ class TelemetryHub:
     def __init__(self):
         self._lock = asyncio.Lock()
         self.latest_telemetry: Optional[dict] = None
-        self.latest_frame: Optional[np.ndarray] = None
+        self.frame_buffer: deque = deque(maxlen=60)  # ~2 seconds of frames at 30fps
 
     async def ingest_telemetry(self, data: dict):
         async with self._lock:
             self.latest_telemetry = data
 
-    async def ingest_frame(self, frame: np.ndarray):
+    async def ingest_frame(self, frame: np.ndarray, timestamp: float):
         async with self._lock:
-            self.latest_frame = frame
+            self.frame_buffer.append((timestamp, frame))
 
-    async def snapshot_frame(self) -> Optional[np.ndarray]:
+    async def get_closest_frame(self, target_ts: float, max_age_s: float = 0.15):
+        """Return the buffered frame whose capture time is nearest target_ts,
+        or None if nothing in the buffer is within max_age_s of it (better to
+        skip visual odometry for a tick than silently pair a stale frame)."""
         async with self._lock:
-            return None if self.latest_frame is None else self.latest_frame.copy()
+            if not self.frame_buffer:
+                return None
+            closest_ts, closest_frame = min(self.frame_buffer, key=lambda item: abs(item[0] - target_ts))
+            if abs(closest_ts - target_ts) > max_age_s:
+                return None
+            return closest_frame.copy()
 
 
 # ── Encoder-only kinematics ──────────────────────────────────────────────
@@ -435,7 +444,7 @@ class RobotBackend:
         frame = None
         new_kf = None
         if self.odometry.mode == OdometryMode.FUSED_VISUAL:
-            frame = await self.hub.snapshot_frame()
+            frame = await self.hub.get_closest_frame(now)
 
         # 1. SSOT pose update — the ONLY place x/y/theta is computed.
         delta = self.odometry.process(data, new_kf=None)  # encoder-only tick update first
@@ -530,7 +539,7 @@ class RobotBackend:
                     img_array = np.array(bytearray(resp.content), dtype=np.uint8)
                     frame = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
                     if frame is not None:
-                        await self.hub.ingest_frame(frame)
+                        await self.hub.ingest_frame(frame, time.time())
             except Exception:
                 pass
             await asyncio.sleep(0.03)
