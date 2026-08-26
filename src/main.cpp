@@ -5,14 +5,13 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 
-
-/*#define DEBUG_SERIAL 1
+#define DEBUG_SERIAL 0
 
 #if DEBUG_SERIAL
   #define DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)
 #else
   #define DEBUG_PRINTF(...) ((void)0)
-#endif*/
+#endif
 
 AsyncWebServer   server(80);
 WebSocketsClient webSocketClient; 
@@ -144,12 +143,19 @@ void loop() {
     pcnt_get_counter_value(PCNT_UNIT_0, &current_ticks_left);
     pcnt_get_counter_value(PCNT_UNIT_1, &current_ticks_right);
 
-    // --- Odometry ---
+    // --- Local odometry (ESP-side only) ---
+    // NOTE: robot_x/robot_y/current_angle are NOT sent to Python as authoritative
+    // pose anymore. Python's OdometryProvider recomputes x/y/theta itself from the
+    // raw ticks_left/ticks_right/gyro_z_dps this loop broadcasts below — that's the
+    // single source of truth now. These local values are kept only so the servo
+    // scan math (x_scan/y_scan, SCAN message pose) has *something* to project
+    // against on this side; they are sent to Python as esp_x/esp_y/esp_theta,
+    // clearly separate from the corrected x/y/theta the browser ultimately sees.
     int16_t delta_left  = current_ticks_left  - prev_ticks_left;
     int16_t delta_right = current_ticks_right - prev_ticks_right;
 
-    /*DEBUG_PRINTF("ticks L:%d R:%d | delta L:%d R:%d\n", 
-    current_ticks_left, current_ticks_right, delta_left, delta_right);*/
+    DEBUG_PRINTF("ticks L:%d R:%d | delta L:%d R:%d\n",
+                 current_ticks_left, current_ticks_right, delta_left, delta_right);
 
     float delta_s_left  = (float)delta_left  * DISTANCE_PER_TICK;
     float delta_s_right = (float)delta_right * DISTANCE_PER_TICK;
@@ -164,10 +170,8 @@ void loop() {
     prev_ticks_left  = current_ticks_left;
     prev_ticks_right = current_ticks_right;
 
-    // --- Gyro Integration ---
-    
+    // --- Gyro (raw rate only — no on-device integration sent downstream) ---
     int16_t ax, ay, az, gx, gy, gz;
-
     mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
     float dt = (current_time - last_gyro_time) / 1000.0;
@@ -180,9 +184,8 @@ void loop() {
         gz_cal = 0;
 
     // MPU6050 default sensitivity = 131 LSB/(deg/s)
-    float gyro_rate_z = gz_cal / 131.0;
-
-    heading_deg += gyro_rate_z * dt;
+    float gyro_rate_z = gz_cal / 131.0;   // deg/s — this raw rate is what gets sent to Python
+    heading_deg += gyro_rate_z * dt;      // kept locally only, for your own Serial debugging if needed
 
     VL53L0X_RangingMeasurementData_t measure;
     uint16_t distance_mm = 8190;  // default = out of range
@@ -190,7 +193,8 @@ void loop() {
       distance_mm = lox.readRangeResult();
     }
 
-    printf("perm_to_scan = %d \n", perm_to_scan);
+    DEBUG_PRINTF("perm_to_scan = %d\n", perm_to_scan);
+
     // rotate the servo for scanning
     if (abs(delta_s) < 0.5 && perm_to_scan) {
       if (!waiting_for_settle) {
@@ -207,8 +211,8 @@ void loop() {
         if (scan_index < 0) scan_index = 0;
         if (scan_index >= ServoArraySize) scan_index = ServoArraySize - 1;
 
-        Serial.printf("WRITE scan_array[%d] = %u (angle=%d, rangeComplete=%d)\n",
-                  scan_index, distance_mm, current_servo_angle, lox.isRangeComplete());
+        DEBUG_PRINTF("WRITE scan_array[%d] = %u (angle=%d, rangeComplete=%d)\n",
+                     scan_index, distance_mm, current_servo_angle, lox.isRangeComplete());
 
         scan_array[scan_index] = distance_mm;
 
@@ -240,21 +244,15 @@ void loop() {
       perm_to_scan = true;
     }
 
-    // scan coordinates
-    //float current_servo_angle_radians = current_servo_angle*(PI / 180.0);
+    // scan coordinates (still projected from ESP-local pose — see note above)
     float sensor_world_angle = current_angle - (PI / 2.0);
     float x_scan = (distance_mm * cos(sensor_world_angle)) + robot_x + x_offset;
     float y_scan = (distance_mm * sin(sensor_world_angle)) + robot_y + y_offset;
-    
-    /*Serial.print("Encoder Angle: ");
-    Serial.print(current_angle * (180.0 / PI));
 
-    Serial.print("  Gyro Angle: ");
-    Serial.println(heading_deg);*/
     float correction = 0.0, error = 0.0;
     int left_pwm = BASE_SPEED, right_pwm = BASE_SPEED;
 
-        // --- P Controller (only during straight movement) ---
+    // --- P Controller (only during straight movement) ---
     if (pid_active) {
       pid_startup_count++;
       if (pid_startup_count <= PID_STARTUP_IGNORE) {
@@ -265,7 +263,6 @@ void loop() {
         error = (float)(delta_right - delta_left);
         integral += error;
         integral = constrain(integral, -50, 50);  // clamp it
-        //correction = (Kp * error) + (Ki * integral);
 
         // Flip correction direction for backward movement
         if (delta_left < 0 && delta_right < 0) {
@@ -276,8 +273,6 @@ void loop() {
         left_pwm  = constrain((int)(BASE_SPEED + correction), 0, 255);
         right_pwm = constrain((int)(BASE_SPEED - correction), 0, 255);
 
-        //Serial.printf("delta_left: %d, delta_right: %d, error: %.2f, integral: %.2f, left_pwm: %d, right_pwm: %d, current_ticks_left: %d, current_ticks_right: %d,",
-        //    delta_left, delta_right, error, integral, left_pwm, right_pwm, current_ticks_left, current_ticks_right);
         ledcWrite(leftChannel,  left_pwm);
         ledcWrite(rightChannel, right_pwm);
       }
@@ -292,11 +287,23 @@ void loop() {
     }
 
     // --- Broadcast telemetry ---
-    char buf[420];
+    // Raw inputs (ticks_left, ticks_right, gyro_z_dps) are what Python's
+    // OdometryProvider actually consumes as the single source of pose truth.
+    // esp_x/esp_y/esp_theta are ESP-local dead reckoning only, kept for
+    // reference/debugging — Python overwrites x/y/theta before it reaches
+    // the browser, so these are intentionally namespaced to avoid confusion.
+    char buf[480];
     snprintf(buf, sizeof(buf),
-      "{\"x\":%.2f,\"y\":%.2f,\"theta\":%.2f,\"gyro_angle\":%.2f,\"dist\":%.2f,\"debug\":true,\"kp\":%.1f,\"error\":%.2f,\"integral\":%.2f,\"lpwm\":%d,\"rpwm\":%d,\"delta_right\":%d,\"delta_left\":%d,\"measure\":%d,\"x_scan\":%.2f,\"y_scan\":%.2f,\"delta_s\":%.2f}",
-      robot_x, robot_y, current_angle * (180.0 / PI), heading_deg, total_distance, Kp, error, integral, left_pwm, right_pwm, delta_right, delta_left, distance_mm, x_scan, y_scan,delta_s);
-    //DEBUG_PRINTF("%s\n", buf);
+      "{\"ticks_left\":%d,\"ticks_right\":%d,\"gyro_z_dps\":%.3f,"
+      "\"esp_x\":%.2f,\"esp_y\":%.2f,\"esp_theta\":%.2f,"
+      "\"dist\":%.2f,\"debug\":true,\"kp\":%.1f,\"error\":%.2f,\"integral\":%.2f,"
+      "\"lpwm\":%d,\"rpwm\":%d,\"delta_right\":%d,\"delta_left\":%d,"
+      "\"measure\":%d,\"x_scan\":%.2f,\"y_scan\":%.2f,\"delta_s\":%.2f}",
+      current_ticks_left, current_ticks_right, gyro_rate_z,
+      robot_x, robot_y, current_angle * (180.0 / PI),
+      total_distance, Kp, error, integral, left_pwm, right_pwm,
+      delta_right, delta_left, distance_mm, x_scan, y_scan, delta_s);
+    DEBUG_PRINTF("%s\n", buf);
     webSocketClient.sendTXT(buf);
 
   }
