@@ -27,12 +27,12 @@ unsigned long last_loop_time = 0;
 const unsigned long LOOP_INTERVAL_MS = 100;
 
 // --- PID ---
-const float Kp          = 0.4;   // tune this: increase if still drifting, decrease if wobbling was 2.2
+const float Kp          = 0.3;   // tune this: increase if still drifting, decrease if wobbling was 2.2
 const int   BASE_SPEED  = 200;  // was 180
 int16_t pid_ticks_left  = 0;   // tick snapshot when movement started
 int16_t pid_ticks_right = 0;
 float integral = 0.0;
-const float Ki = 0.4;
+const float Ki = 0.5;
 bool pid_active = false;
 int pid_startup_count = 0;
 const int PID_STARTUP_IGNORE = 3;  // ignore first 3 readings
@@ -62,7 +62,7 @@ bool sweepForward = true;
 float last_scan_x = 0.0;
 float last_scan_y = 0.0;
 const float MIN_RESCAN_DISTANCE = 150.0;  // mm — tune this
-const int x_offset = 12.5;
+const int x_offset = 54.0;
 const int y_offset = 0;
 const int SERVO_STEP_SIZE = 10;          // was 5 — fewer, more deliberate steps
 const unsigned long SERVO_SETTLE_MS = 120;  // tune this: raise if still jittery, lower if scans feel slow

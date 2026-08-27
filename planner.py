@@ -48,15 +48,17 @@ from collections import deque
 
 # ── Constants ────────────────────────────────────────────────────────────
 PYTHON_WS_PORT = 8765
-PHONE_URL = "http://192.168.1.15:8080/shot.jpg"
+PHONE_URL = "http://10.24.150.51:8080/shot.jpg"
 
 WHEEL_DIAMETER_MM = 68.0
 TRACK_WIDTH_MM = 317.0
 TICKS_PER_REVOLUTION = 2340.0
 
 FRAME_WIDTH, FRAME_HEIGHT = 1920, 1080
-FOCAL_LENGTH = float(FRAME_WIDTH * 0.8)
-PRINCIPAL_POINT = (float(FRAME_WIDTH / 2.0), float(FRAME_HEIGHT / 2.0))
+FOCAL_LENGTH = 525
+PRINCIPAL_POINT = 323.033, 240.073
+CAMERA_OFFSET_X_MM = -25.0  # forward(+)/behind(-) robot center
+CAMERA_OFFSET_Y_MM = 70.0   # left(+)/right(-) of robot center
 
 KEYFRAME_MIN_DIST_MM = 150.0
 KEYFRAME_MIN_ANGLE_DEG = 11.0
@@ -158,10 +160,12 @@ class VisualOdometryEngine:
     falls back to gyro instead of trusting a likely-degenerate visual solve.
     """
 
-    def __init__(self, focal_length, principal_point, scale_gate_ratio=0.4):
+    def __init__(self, focal_length, principal_point, scale_gate_ratio=0.4,
+                camera_offset=(0.0, 0.0)):
         self.focal = focal_length
         self.pp = principal_point
         self.scale_gate_ratio = scale_gate_ratio
+        self.camera_offset = np.array(camera_offset)  # (x, y) mm, robot frame
 
     def compute_delta(self, prev_kf, new_keypoints, new_descriptors,
                        encoder_delta_s, gyro_delta_theta, heading_rad):
@@ -194,6 +198,7 @@ class VisualOdometryEngine:
 
         disagreement = abs(visual_theta - gyro_delta_theta)
         gate = max(self.scale_gate_ratio * abs(gyro_delta_theta), np.radians(5))
+
         if disagreement > gate:
             fused_theta = gyro_delta_theta
             agreed = False
@@ -201,9 +206,20 @@ class VisualOdometryEngine:
             fused_theta = 0.5 * (visual_theta + gyro_delta_theta)
             agreed = True
 
+        camera_dx = encoder_delta_s * float(t[0, 0])
+        camera_dy = encoder_delta_s * float(t[1, 0])
+
+        # Correct for the camera not being at the rotation center: subtract how much
+        # the offset point moved due to rotation alone, leaving pure robot-center motion.
+        cos_before, sin_before = np.cos(heading_rad), np.sin(heading_rad)
+        cos_after, sin_after = np.cos(heading_rad + fused_theta), np.sin(heading_rad + fused_theta)
+        ox, oy = self.camera_offset
+        offset_shift_x = (cos_after * ox - sin_after * oy) - (cos_before * ox - sin_before * oy)
+        offset_shift_y = (sin_after * ox + cos_after * oy) - (sin_before * ox + cos_before * oy)
+
         return PoseDelta(
-            delta_x=encoder_delta_s * float(t[0, 0]),
-            delta_y=encoder_delta_s * float(t[1, 0]),
+            delta_x=camera_dx - offset_shift_x,
+            delta_y=camera_dy - offset_shift_y,
             delta_theta=fused_theta,
         ), agreed
 
@@ -421,7 +437,10 @@ class RobotBackend:
     def __init__(self, mode: OdometryMode = OdometryMode.PURE_ENCODER):
         self.hub = TelemetryHub()
         self.encoder_engine = EncoderOdometryEngine(WHEEL_DIAMETER_MM, TRACK_WIDTH_MM, TICKS_PER_REVOLUTION)
-        self.visual_engine = VisualOdometryEngine(FOCAL_LENGTH, PRINCIPAL_POINT)
+        self.visual_engine = VisualOdometryEngine(
+            FOCAL_LENGTH, PRINCIPAL_POINT,
+            camera_offset=(CAMERA_OFFSET_X_MM, CAMERA_OFFSET_Y_MM),
+        )
         self.odometry = OdometryProvider(mode, self.encoder_engine, self.visual_engine)
         self.graph = SlamGraphManager()
         self.keyframes = KeyframeManager(self.graph)
@@ -490,9 +509,12 @@ class RobotBackend:
         websockets.broadcast(self.browser_clients, payload)
 
     async def handle_scan(self, message: str, data: dict):
-        # Raw ToF sweep — forwarded as-is to browsers (already own dedicated visualization).
         if self.browser_clients:
-            websockets.broadcast(self.browser_clients, message)
+            pose = self.odometry.current_pose_dict()
+            data["x"] = pose["x"]
+            data["y"] = pose["y"]
+            data["theta"] = np.degrees(pose["theta"])
+            websockets.broadcast(self.browser_clients, json.dumps(data))
 
     async def handle_client(self, websocket):
         print(f"New connection from {websocket.remote_address}")
@@ -509,6 +531,12 @@ class RobotBackend:
                     data = json.loads(message)
                 except json.JSONDecodeError:
                     print(f"[BROWSER→ESP32] {message}")
+                    if message == "RESET":
+                        self.odometry.pose = GlobalPose()
+                        self.odometry._prev_ticks_left = None
+                        self.odometry._prev_ticks_right = None
+                        self.keyframes.keyframes.clear()
+                        print("[SSOT] Pose provider reset alongside ESP32.")
                     if self.esp32_socket:
                         await self.esp32_socket.send(message)
                     continue
