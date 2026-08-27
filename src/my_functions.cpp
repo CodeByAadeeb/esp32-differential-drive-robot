@@ -10,7 +10,7 @@ const float WHEEL_DIAMETER_MM = 68.0;
 const float TRACK_WIDTH_MM    = 317;
 
 // --- Calculated Constants ---
-const float TICKS_PER_REVOLUTION  = 2340.0;
+const float TICKS_PER_REVOLUTION  = 4680.0;
 const float DISTANCE_PER_TICK = M_PI * WHEEL_DIAMETER_MM / TICKS_PER_REVOLUTION;
 
 
@@ -27,7 +27,7 @@ unsigned long last_loop_time = 0;
 const unsigned long LOOP_INTERVAL_MS = 100;
 
 // --- PID ---
-const float Kp          = 0.3;   // tune this: increase if still drifting, decrease if wobbling was 2.2
+const float Kp          = 0.8;   // tune this: increase if still drifting, decrease if wobbling was 2.2
 const int   BASE_SPEED  = 200;  // was 180
 int16_t pid_ticks_left  = 0;   // tick snapshot when movement started
 int16_t pid_ticks_right = 0;

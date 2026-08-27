@@ -519,7 +519,7 @@
       if (d.x !== undefined && d.y !== undefined) {
         pathHistory.push({ x: parseFloat(d.x), y: parseFloat(d.y) });
         if (pathHistory.length > MAX_POINTS) pathHistory.shift();
-        if (d.theta !== undefined) lastTheta = parseFloat(d.theta);
+        if (d.theta !== undefined) lastTheta = -parseFloat(d.theta);
       }
 
       // Live single-point scan (blue) — the ESP32's own current-angle TOF projection
@@ -541,7 +541,7 @@
     function handleScanSweep(d) {
       const rx = parseFloat(d.x);
       const ry = parseFloat(d.y);
-      const rThetaRad = parseFloat(d.theta) * (Math.PI / 180.0);
+      const rThetaRad = -parseFloat(d.theta) * (Math.PI / 180.0);
       const measures = d.measure;
       const stepAngle = Math.PI / (measures.length - 1); // spread across 0..180°
 
@@ -590,7 +590,7 @@
 
       console.groupCollapsed(`🔁 [LOOP CLOSURE] Pose graph re-optimized — ${poseGraphNodes.length} keyframes`);
       if (loopEdge) console.log('closed edge:', loopEdge);
-      console.table(poseGraphNodes);
+      console.log('keyframes:', poseGraphNodes);
       console.groupEnd();
 
       startFlashLoop();
@@ -607,7 +607,7 @@
         x_scan: fmt(d.x_scan), y_scan: fmt(d.y_scan),
         vl53: Array.isArray(d.measure) ? undefined : d.measure
       };
-      console.table(row);
+      console.log('telemetry:', row);
 
       const errAbs = Math.abs(parseFloat(d.error));
       if (!Number.isNaN(errAbs) && errAbs > ERROR_WARN_THRESHOLD) {
