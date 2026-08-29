@@ -48,7 +48,7 @@ from collections import deque
 
 # ── Constants ────────────────────────────────────────────────────────────
 PYTHON_WS_PORT = 8765
-PHONE_URL = "http://10.24.150.51:8080/shot.jpg"
+PHONE_URL = "http://10.129.54.209:8080/shot.jpg"
 
 WHEEL_DIAMETER_MM = 68.0
 TRACK_WIDTH_MM = 317.0
@@ -142,7 +142,7 @@ class EncoderOdometryEngine:
         s_left = d_ticks_left * self.dist_per_tick
         s_right = d_ticks_right * self.dist_per_tick
         delta_s = (s_left + s_right) / 2.0
-        delta_theta = (s_right - s_left) / self.track_width_mm
+        delta_theta = -(s_right - s_left) / self.track_width_mm
         return PoseDelta(
             delta_x=delta_s * np.cos(heading_rad),
             delta_y=delta_s * np.sin(heading_rad),
@@ -206,7 +206,7 @@ class VisualOdometryEngine:
             fused_theta = 0.5 * (visual_theta + gyro_delta_theta)
             agreed = True
 
-        camera_dx = encoder_delta_s * float(t[0, 0])
+        camera_dx = encoder_delta_s * float(t[0, 0]) # also add an agreement block for this like for theta
         camera_dy = encoder_delta_s * float(t[1, 0])
 
         # Correct for the camera not being at the rotation center: subtract how much
@@ -253,6 +253,10 @@ class OdometryProvider:
         self.mode = mode
 
     def _consume_tick_delta(self, telemetry: dict):
+        if telemetry.get("tick_reset"):
+            self._prev_ticks_left = 0
+            self._prev_ticks_right = 0
+            return 0, 0
         tl, tr = telemetry["ticks_left"], telemetry["ticks_right"]
         if self._prev_ticks_left is None:
             self._prev_ticks_left, self._prev_ticks_right = tl, tr
@@ -558,19 +562,51 @@ class RobotBackend:
                 print(f"[BROWSER] Disconnected. Total: {len(self.browser_clients)}")
 
     async def fetch_camera_frames(self):
-        """Continuously pulls the newest camera frame into the hub (non-blocking)."""
-        loop = asyncio.get_running_loop()
-        while True:
-            try:
-                resp = await loop.run_in_executor(None, lambda: requests.get(PHONE_URL, timeout=1))
-                if resp.status_code == 200:
-                    img_array = np.array(bytearray(resp.content), dtype=np.uint8)
-                    frame = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
-                    if frame is not None:
-                        await self.hub.ingest_frame(frame, time.time())
-            except Exception:
-                pass
-            await asyncio.sleep(0.03)
+            """Continuously pulls frames from a persistent MJPEG stream."""
+            loop = asyncio.get_running_loop()
+            
+            def read_mjpeg_stream():
+                # Standard IP Webcam endpoints: /video or /videofeed
+                stream_url = "http://10.129.54.209:8080/video"
+                print(f"🔄 [CAMERA] Connecting to persistent stream at {stream_url}...")
+                
+                while True:
+                    try:
+                        # stream=True keeps ONE single HTTP connection open
+                        response = requests.get(stream_url, stream=True, timeout=5)
+                        if response.status_code != 200:
+                            print(f"❌ [CAMERA] HTTP {response.status_code} error. Retrying...")
+                            time.sleep(1)
+                            continue
+
+                        print("✅ [CAMERA] Persistent stream connected successfully!")
+                        bytes_buffer = b""
+
+                        # Read the raw MJPEG byte stream continuously
+                        for chunk in response.iter_content(chunk_size=4096):
+                            bytes_buffer += chunk
+                            start = bytes_buffer.find(b'\xff\xd8')  # JPEG start tag
+                            end = bytes_buffer.find(b'\xff\xd9')    # JPEG end tag
+
+                            if start != -1 and end != -1:
+                                jpg_data = bytes_buffer[start:end + 2]
+                                bytes_buffer = bytes_buffer[end + 2:]
+
+                                # Decode frame directly from memory
+                                img_array = np.frombuffer(jpg_data, dtype=np.uint8)
+                                frame = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
+
+                                if frame is not None:
+                                    asyncio.run_coroutine_threadsafe(
+                                        self.hub.ingest_frame(frame, time.time()), 
+                                        loop
+                                    )
+
+                    except Exception as e:
+                        print(f"❌ [CAMERA] Connection error: {e}. Reconnecting in 1s...")
+                        time.sleep(1)
+
+            await loop.run_in_executor(None, read_mjpeg_stream)
 
 
 async def main():

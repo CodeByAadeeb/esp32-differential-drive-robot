@@ -27,12 +27,12 @@ unsigned long last_loop_time = 0;
 const unsigned long LOOP_INTERVAL_MS = 100;
 
 // --- PID ---
-const float Kp          = 0.8;   // tune this: increase if still drifting, decrease if wobbling was 2.2
+const float Kp          = 1.3;   // tune this: increase if still drifting, decrease if wobbling was 2.2
 const int   BASE_SPEED  = 200;  // was 180
 int16_t pid_ticks_left  = 0;   // tick snapshot when movement started
 int16_t pid_ticks_right = 0;
 float integral = 0.0;
-const float Ki = 0.5;
+const float Ki = 0.0;
 bool pid_active = false;
 int pid_startup_count = 0;
 const int PID_STARTUP_IGNORE = 3;  // ignore first 3 readings
@@ -99,7 +99,7 @@ void setMotors(int left_speed, int right_speed) {
     pid_ticks_left  = tl;
     pid_ticks_right = tr;
     ledcWrite(leftChannel,  BASE_SPEED);
-    ledcWrite(rightChannel, BASE_SPEED);
+    ledcWrite(rightChannel, BASE_SPEED*0.97);
     digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH);
     digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH);
 
@@ -114,7 +114,7 @@ void setMotors(int left_speed, int right_speed) {
     pid_ticks_left  = tl;
     pid_ticks_right = tr;
     ledcWrite(leftChannel,  BASE_SPEED);
-    ledcWrite(rightChannel, BASE_SPEED);
+    ledcWrite(rightChannel, BASE_SPEED*0.97);
     digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
     digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
 

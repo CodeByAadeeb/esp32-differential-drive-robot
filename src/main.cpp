@@ -91,7 +91,7 @@ void setup() {
   server.onNotFound(onPageNotFound);
   server.begin();
 
-  webSocketClient.begin("10.24.150.23", 8765, "/"); // Python server IP  doubt on this line
+  webSocketClient.begin("10.129.54.23", 8765, "/"); // Python server IP  doubt on this line
   webSocketClient.onEvent(onPythonEvent);
   webSocketClient.enableHeartbeat(15000, 3000, 2);
 
@@ -279,11 +279,15 @@ void loop() {
     }
 
     // After computing delta_left, delta_right and using them:
+    bool tick_reset = false;
     if (abs(current_ticks_left) > 20000 || abs(current_ticks_right) > 20000) {
         pcnt_counter_clear(PCNT_UNIT_0);
         pcnt_counter_clear(PCNT_UNIT_1);
         prev_ticks_left = 0;
         prev_ticks_right = 0;
+        current_ticks_left = 0;
+        current_ticks_right = 0;
+        tick_reset = true;
     }
 
     // --- Broadcast telemetry ---
@@ -298,11 +302,11 @@ void loop() {
       "\"esp_x\":%.2f,\"esp_y\":%.2f,\"esp_theta\":%.2f,"
       "\"dist\":%.2f,\"debug\":true,\"kp\":%.1f,\"error\":%.2f,\"integral\":%.2f,"
       "\"lpwm\":%d,\"rpwm\":%d,\"delta_right\":%d,\"delta_left\":%d,"
-      "\"measure\":%d,\"x_scan\":%.2f,\"y_scan\":%.2f,\"delta_s\":%.2f}",
+      "\"measure\":%d,\"x_scan\":%.2f,\"y_scan\":%.2f,\"delta_s\":%.2f,\"tick_reset\":%s}",
       current_ticks_left, current_ticks_right, gyro_rate_z,
       robot_x, robot_y, current_angle * (180.0 / PI),
       total_distance, Kp, error, integral, left_pwm, right_pwm,
-      delta_right, delta_left, distance_mm, x_scan, y_scan, delta_s);
+      delta_right, delta_left, distance_mm, x_scan, y_scan, delta_s, tick_reset ? "true" : "false");
     DEBUG_PRINTF("%s\n", buf);
     webSocketClient.sendTXT(buf);
 

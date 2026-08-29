@@ -178,7 +178,7 @@
   </div>
 
   <script>
-    const WS_URL = 'ws://10.24.150.23:8765';  // ← Python server IP:port
+    const WS_URL = 'ws://10.129.54.23:8765';  // ← Python server IP:port
     let ws = null;
 
     // ── Tunable debug thresholds (adjust these while tuning PID) ──
@@ -519,7 +519,7 @@
       if (d.x !== undefined && d.y !== undefined) {
         pathHistory.push({ x: parseFloat(d.x), y: parseFloat(d.y) });
         if (pathHistory.length > MAX_POINTS) pathHistory.shift();
-        if (d.theta !== undefined) lastTheta = -parseFloat(d.theta);
+        if (d.theta !== undefined) lastTheta = parseFloat(d.theta);
       }
 
       // Live single-point scan (blue) — the ESP32's own current-angle TOF projection
@@ -541,7 +541,7 @@
     function handleScanSweep(d) {
       const rx = parseFloat(d.x);
       const ry = parseFloat(d.y);
-      const rThetaRad = -parseFloat(d.theta) * (Math.PI / 180.0);
+      const rThetaRad = parseFloat(d.theta) * (Math.PI / 180.0);
       const measures = d.measure;
       const stepAngle = Math.PI / (measures.length - 1); // spread across 0..180°
 
