@@ -1,9 +1,9 @@
 """
-Single Source of Truth (SSOT) robot backend.
+Single Source of Truth (SSOT) robot backend, with multi-modal loop closure.
 
 Architecture
 ------------
-Raw ESP32 telemetry (wheel ticks, gyro_z) + raw camera frames
+Raw ESP32 telemetry (wheel ticks, gyro_z) + raw camera frames + ToF sweeps
                     |
                     v
             TelemetryHub  (thread/coroutine-safe ingestion, no pose math here)
@@ -15,25 +15,29 @@ Raw ESP32 telemetry (wheel ticks, gyro_z) + raw camera frames
    WebSocket Publisher   SlamGraphManager
    (Web UI browsers)     (GTSAM pose graph)
 
-Both downstream consumers read the *same* PoseDelta / global pose objects
-produced by OdometryProvider.process(). Neither the UI broadcaster nor the
-SLAM graph builder is allowed to independently recompute x/y/theta from raw
-ticks or ORB matches — that duplication was the original bug.
+Loop closure voting
+--------------------
+1. Camera (ORB + essential-matrix + RANSAC) is checked first, against ALL
+   sufficiently old keyframes. If it passes strict geometric verification,
+   that's accepted immediately — it's the strongest evidence.
+2. If camera does NOT confirm a closure, keyframes within ODOM_PROXIMITY_RADIUS_MM
+   of the current (drifted) SSOT position are checked with a lightweight ToF
+   sweep alignment (ScanMatcher). If the sweep shapes agree well after a small
+   drift-correction search, that's accepted as a probable closure — odometry
+   proximity + matching scan shape together are treated as sufficient evidence
+   even without a camera confirmation.
 
-REQUIRED FIRMWARE CHANGE
--------------------------
-The ESP32 must send raw sensor data, not its own pre-computed pose, e.g.:
+REQUIRED FIRMWARE
+------------------
+The ESP32 must send raw sensor data, not its own pre-computed pose:
     {"ticks_left": 1234, "ticks_right": 1198, "gyro_z_dps": 0.42,
-     "kp": 0.4, "error": 0.0, "lpwm": 200, "rpwm": 200, ...}
-If the ESP32 keeps sending its own x/y/theta and this backend keeps using
-them, you still have two independently-drifting pose sources wearing one
-JSON payload — that defeats the point of an SSOT pipeline.
+     "kp": 0.4, "error": 0.0, "lpwm": 200, "rpwm": 200, "tick_reset": false, ...}
 """
 
 import asyncio
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
@@ -48,25 +52,51 @@ from collections import deque
 
 # ── Constants ────────────────────────────────────────────────────────────
 PYTHON_WS_PORT = 8765
-PHONE_URL = "http://10.129.54.209:8080/shot.jpg"
+PHONE_IP = "10.129.54.209"
+PHONE_STREAM_URL = f"http://{PHONE_IP}:8080/video"
 
 WHEEL_DIAMETER_MM = 68.0
 TRACK_WIDTH_MM = 317.0
 TICKS_PER_REVOLUTION = 2340.0
 
+# Original phone stream resolution (before the resize applied in fetch_camera_frames).
 FRAME_WIDTH, FRAME_HEIGHT = 1920, 1080
-FOCAL_LENGTH = 525
-PRINCIPAL_POINT = 323.033, 240.073
+_RESIZE_TARGET_WIDTH = 640
+_RESIZE_SCALE = _RESIZE_TARGET_WIDTH / FRAME_WIDTH
+
+# Calibrated intrinsics at ORIGINAL resolution, then scaled to match the resize
+# applied to every frame before ORB runs on it — intrinsics MUST scale with the
+# image or essential-matrix decomposition becomes systematically wrong, not just fast.
+_FOCAL_LENGTH_ORIG = 525.0
+_PRINCIPAL_POINT_ORIG = (323.033, 240.073)
+FOCAL_LENGTH = _FOCAL_LENGTH_ORIG * _RESIZE_SCALE
+PRINCIPAL_POINT = (_PRINCIPAL_POINT_ORIG[0] * _RESIZE_SCALE, _PRINCIPAL_POINT_ORIG[1] * _RESIZE_SCALE)
+
 CAMERA_OFFSET_X_MM = -25.0  # forward(+)/behind(-) robot center
 CAMERA_OFFSET_Y_MM = 70.0   # left(+)/right(-) of robot center
 
 KEYFRAME_MIN_DIST_MM = 150.0
 KEYFRAME_MIN_ANGLE_DEG = 11.0
-LOOP_CLOSURE_MIN_HISTORY = 10
-LOOP_CLOSURE_SKIP_RECENT = 8
-MIN_LOOP_MATCHES = 30
-MIN_INLIER_COUNT = 20
+
+# Camera loop-closure thresholds — kept internally consistent: inlier requirement
+# stays BELOW the match requirement (inliers can never exceed total matches), and
+# history exceeds skip-recent so there's ever actually a non-empty candidate set.
+LOOP_CLOSURE_MIN_HISTORY = 6
+LOOP_CLOSURE_SKIP_RECENT = 3
+MIN_LOOP_MATCHES = 15
+MIN_INLIER_COUNT = 8
 MIN_INLIER_RATIO = 0.50
+
+# Odometry-proximity + ToF scan-matching loop closure (fallback when camera doesn't confirm).
+ODOM_PROXIMITY_RADIUS_MM = 800.0
+SCAN_MIN_RANGE_MM = 20.0
+SCAN_MAX_RANGE_MM = 1000.0
+SCAN_MATCH_SEARCH_XY_MM = 300.0
+SCAN_MATCH_XY_STEP_MM = 50.0
+SCAN_MATCH_SEARCH_THETA_DEG = 20.0
+SCAN_MATCH_THETA_STEP_DEG = 5.0
+SCAN_MATCH_MAX_RESIDUAL_MM = 80.0
+SCAN_MATCH_MIN_INLIER_POINTS = 6
 
 
 class OdometryMode(Enum):
@@ -95,6 +125,27 @@ class GlobalPose:
 
     def as_dict(self):
         return {"x": self.x, "y": self.y, "theta": self.theta}
+
+
+def scan_to_world_points(pose_rad: dict, measures: list,
+                          min_range=SCAN_MIN_RANGE_MM, max_range=SCAN_MAX_RANGE_MM) -> list:
+    """Project a raw ToF sweep (list of distances across a 0-180deg arc) into
+    world-frame (x, y) mm points, using the SSOT pose (theta in RADIANS) at the
+    time the sweep was captured. Mirrors the same geometry index.html uses."""
+    n = len(measures)
+    if n < 2:
+        return []
+    step = np.pi / (n - 1)
+    theta = pose_rad["theta"]
+    points = []
+    for i, dist in enumerate(measures):
+        if min_range < dist < max_range:
+            servo_angle = i * step - (np.pi / 2)
+            world_angle = theta + servo_angle
+            x = pose_rad["x"] + dist * np.cos(world_angle)
+            y = pose_rad["y"] + dist * np.sin(world_angle)
+            points.append((x, y))
+    return points
 
 
 # ── Thread/coroutine-safe ingestion point ───────────────────────────────
@@ -161,7 +212,7 @@ class VisualOdometryEngine:
     """
 
     def __init__(self, focal_length, principal_point, scale_gate_ratio=0.4,
-                camera_offset=(0.0, 0.0)):
+                 camera_offset=(0.0, 0.0)):
         self.focal = focal_length
         self.pp = principal_point
         self.scale_gate_ratio = scale_gate_ratio
@@ -169,8 +220,20 @@ class VisualOdometryEngine:
 
     def compute_delta(self, prev_kf, new_keypoints, new_descriptors,
                        encoder_delta_s, gyro_delta_theta, heading_rad):
+        previous_descriptors = prev_kf.descriptors
+        descriptors_usable = (
+            new_descriptors is not None
+            and previous_descriptors is not None
+            and new_descriptors.ndim == 2
+            and previous_descriptors.ndim == 2
+            and new_descriptors.shape[1] == previous_descriptors.shape[1]
+            and new_descriptors.dtype == previous_descriptors.dtype
+        )
+        if not descriptors_usable:
+            return self._encoder_fallback(encoder_delta_s, gyro_delta_theta, heading_rad), False
+
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-        matches = bf.knnMatch(new_descriptors, prev_kf.descriptors, k=2)
+        matches = bf.knnMatch(new_descriptors, previous_descriptors, k=2)
 
         pts_new, pts_prev = [], []
         for pair in matches:
@@ -198,7 +261,6 @@ class VisualOdometryEngine:
 
         disagreement = abs(visual_theta - gyro_delta_theta)
         gate = max(self.scale_gate_ratio * abs(gyro_delta_theta), np.radians(5))
-
         if disagreement > gate:
             fused_theta = gyro_delta_theta
             agreed = False
@@ -206,8 +268,10 @@ class VisualOdometryEngine:
             fused_theta = 0.5 * (visual_theta + gyro_delta_theta)
             agreed = True
 
-        camera_dx = encoder_delta_s * float(t[0, 0]) # also add an agreement block for this like for theta
-        camera_dy = encoder_delta_s * float(t[1, 0])
+        # OpenCV camera convention: X=right, Y=down, Z=forward. For a forward-facing
+        # camera, forward motion is camera-Z, and lateral (robot-left) is -camera-X.
+        camera_dx = encoder_delta_s * float(t[2, 0])
+        camera_dy = encoder_delta_s * float(-t[0, 0])
 
         # Correct for the camera not being at the rotation center: subtract how much
         # the offset point moved due to rotation alone, leaving pure robot-center motion.
@@ -268,9 +332,10 @@ class OdometryProvider:
 
     def process(self, telemetry: dict, new_kf=None) -> PoseDelta:
         """
-        Call once per telemetry tick. Pass `new_kf` only when a fresh camera
-        keyframe was captured this tick (FUSED_VISUAL mode); otherwise pose
-        falls back to encoder-only for that tick even in FUSED_VISUAL mode.
+        Call once per telemetry tick. Pass `new_kf` (a Keyframe with
+        keypoints/descriptors already computed) only on ticks where a fresh
+        camera keyframe was actually captured this tick — that's what makes
+        visual fusion actually engage, instead of always falling back silently.
         """
         d_left, d_right = self._consume_tick_delta(telemetry)
 
@@ -297,13 +362,20 @@ class OdometryProvider:
     def current_pose_dict(self):
         return self.pose.as_dict()
 
+    def reset(self):
+        self.pose = GlobalPose()
+        self._prev_ticks_left = None
+        self._prev_ticks_right = None
+        self._prev_kf = None
 
-# ── Keyframes & SLAM graph ───────────────────────────────────────────────
+
+# ── Keyframes ─────────────────────────────────────────────────────────
 class Keyframe:
-    def __init__(self, kf_id: int, frame: np.ndarray, pose_at_capture: dict):
+    def __init__(self, kf_id: int, frame: np.ndarray, pose_at_capture: dict, scan_points: Optional[list] = None):
         self.id = kf_id
-        self.pose_at_capture = pose_at_capture       # SSOT pose when this frame was taken
+        self.pose_at_capture = pose_at_capture       # SSOT pose when this frame was taken (radians theta)
         self.visualpose = dict(pose_at_capture)      # corrected on loop closure; starts equal to SSOT pose
+        self.scan_points = scan_points                # world-frame ToF sweep points near this capture, or None
         orb = cv2.ORB_create(nfeatures=750)
         self.keypoints, self.descriptors = orb.detectAndCompute(frame, mask=None)
 
@@ -317,6 +389,7 @@ def should_create_keyframe(current_pose: dict, last_kf_pose: dict,
     return delta_d >= min_dist or delta_theta_deg >= min_angle_deg
 
 
+# ── SLAM graph ────────────────────────────────────────────────────────
 class SlamGraphManager:
     def __init__(self):
         self.values = gtsam.Values()
@@ -348,51 +421,119 @@ class SlamGraphManager:
         self.values = result
         return result
 
+    def reset(self):
+        self.values = gtsam.Values()
+        self.graph = gtsam.NonlinearFactorGraph()
 
+
+# ── Lightweight ToF sweep alignment (not a full ICP, deliberately simple) ─
+class ScanMatcher:
+    """
+    Both point sets are already expressed in odometry world-frame, so only a
+    SMALL drift-correction search is needed (not an arbitrary large transform).
+    Grid-searches (dx, dy, dtheta) around zero, picks the alignment with the
+    most nearest-neighbor inliers, and reports whether that's good enough to
+    call it a physical revisit.
+    """
+
+    def __init__(self, search_xy_mm=SCAN_MATCH_SEARCH_XY_MM, xy_step_mm=SCAN_MATCH_XY_STEP_MM,
+                 search_theta_deg=SCAN_MATCH_SEARCH_THETA_DEG, theta_step_deg=SCAN_MATCH_THETA_STEP_DEG,
+                 max_residual_mm=SCAN_MATCH_MAX_RESIDUAL_MM, min_inlier_points=SCAN_MATCH_MIN_INLIER_POINTS):
+        self.xy_offsets = np.arange(-search_xy_mm, search_xy_mm + 1e-6, xy_step_mm)
+        self.theta_offsets = np.radians(np.arange(-search_theta_deg, search_theta_deg + 1e-6, theta_step_deg))
+        self.max_residual_mm = max_residual_mm
+        self.min_inlier_points = min_inlier_points
+
+    def match(self, points_a: list, points_b: list):
+        """Returns (matched: bool, transform: dict|None, mean_residual_mm: float|None)."""
+        if len(points_a) < self.min_inlier_points or len(points_b) < self.min_inlier_points:
+            return False, None, None
+
+        pts_a = np.array(points_a, dtype=np.float64)
+        pts_b = np.array(points_b, dtype=np.float64)
+
+        best_inliers = 0
+        best_residual = None
+        best_transform = None
+
+        # Deliberately simple nested search (not fully vectorized) — point counts
+        # are small (<40) so this stays well under real-time budget; optimize later
+        # if scan history grows large enough to matter.
+        for dtheta in self.theta_offsets:
+            c, s = np.cos(dtheta), np.sin(dtheta)
+            rot = np.array([[c, -s], [s, c]])
+            rotated = pts_a @ rot.T
+            for dx in self.xy_offsets:
+                for dy in self.xy_offsets:
+                    shifted = rotated + np.array([dx, dy])
+                    diffs = shifted[:, None, :] - pts_b[None, :, :]
+                    dists = np.sqrt((diffs ** 2).sum(axis=2))
+                    nearest = dists.min(axis=1)
+                    inlier_mask = nearest <= self.max_residual_mm
+                    inlier_count = int(inlier_mask.sum())
+                    if inlier_count > best_inliers:
+                        best_inliers = inlier_count
+                        best_residual = float(nearest[inlier_mask].mean())
+                        best_transform = {"dx": float(dx), "dy": float(dy), "dtheta": float(dtheta)}
+
+        if best_inliers >= self.min_inlier_points:
+            return True, best_transform, best_residual
+        return False, None, None
+
+
+# ── Keyframe store + multi-modal loop closure ───────────────────────────
 class KeyframeManager:
-    """Owns the keyframe list, keyframe creation, and loop-closure search."""
-
-    def __init__(self, graph: SlamGraphManager):
+    def __init__(self, graph: SlamGraphManager, scan_matcher: ScanMatcher):
         self.keyframes: list[Keyframe] = []
         self.graph = graph
+        self.scan_matcher = scan_matcher
 
-    def maybe_add_keyframe(self, frame: np.ndarray, ssot_pose: dict, delta: PoseDelta):
-        """
-        Returns the new Keyframe if one was created this tick, else None.
-        Adds the corresponding node + odometry factor to the SLAM graph using
-        the SAME delta the OdometryProvider just computed — no separate math.
-        """
-        if not self.keyframes:
-            kf = Keyframe(0, frame, ssot_pose)
-            self.keyframes.append(kf)
-            self.graph.add_node(0, kf.visualpose, is_prior=True)
-            print("[KEYFRAME] Initial Keyframe #0 added.")
-            return kf
+    def reset(self):
+        self.keyframes.clear()
 
-        last_kf = self.keyframes[-1]
-        if not should_create_keyframe(ssot_pose, last_kf.pose_at_capture):
-            return None
-
-        new_id = len(self.keyframes)
-        kf = Keyframe(new_id, frame, ssot_pose)
+    def add_keyframe(self, kf: Keyframe, prev_kf_id: Optional[int], delta: Optional[PoseDelta]):
         self.keyframes.append(kf)
+        if prev_kf_id is None:
+            self.graph.add_node(kf.id, kf.visualpose, is_prior=True)
+            print("[KEYFRAME] Initial Keyframe #0 added.")
+        else:
+            self.graph.add_node(kf.id, kf.visualpose)
+            self.graph.add_odometry_factor(prev_kf_id, kf.id, delta)
+            print(f"[KEYFRAME] #{kf.id} added at ({kf.pose_at_capture['x']:.1f}, {kf.pose_at_capture['y']:.1f})")
 
-        self.graph.add_node(new_id, kf.visualpose)
-        self.graph.add_odometry_factor(last_kf.id, new_id, delta)
-        print(f"[KEYFRAME] #{new_id} added at ({ssot_pose['x']:.1f}, {ssot_pose['y']:.1f})")
-        return kf
+    def odometry_proximate_candidates(self, current_pose: dict, radius_mm: float, exclude_last_n: int) -> list:
+        if len(self.keyframes) <= exclude_last_n:
+            return []
+        out = []
+        pool = self.keyframes[:-exclude_last_n] if exclude_last_n > 0 else self.keyframes
+        for kf in pool:
+            dx = current_pose["x"] - kf.pose_at_capture["x"]
+            dy = current_pose["y"] - kf.pose_at_capture["y"]
+            if (dx * dx + dy * dy) ** 0.5 <= radius_mm:
+                out.append(kf)
+        return out
 
-    def detect_loop_closure(self, new_kf: Keyframe) -> Optional[dict]:
+    def detect_camera_loop_closure(self, new_kf: Keyframe) -> Optional[dict]:
         if len(self.keyframes) < LOOP_CLOSURE_MIN_HISTORY:
+            return None
+        if new_kf.descriptors is None:
             return None
 
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
         candidates = self.keyframes[:-LOOP_CLOSURE_SKIP_RECENT] if len(self.keyframes) > LOOP_CLOSURE_SKIP_RECENT else []
+        if not candidates:
+            return None
 
         best_count, best_idx = 0, -1
         best_pts_new, best_pts_old = [], []
 
         for idx, old_kf in enumerate(candidates):
+            if (old_kf.descriptors is None
+                    or old_kf.descriptors.ndim != 2
+                    or new_kf.descriptors.ndim != 2
+                    or old_kf.descriptors.shape[1] != new_kf.descriptors.shape[1]
+                    or old_kf.descriptors.dtype != new_kf.descriptors.dtype):
+                continue
             matches = bf.knnMatch(new_kf.descriptors, old_kf.descriptors, k=2)
             good, pts_new, pts_old = [], [], []
             for pair in matches:
@@ -420,10 +561,10 @@ class KeyframeManager:
 
         inlier_count = int(np.sum(mask))
         inlier_ratio = inlier_count / best_count
-        print(f"[LOOP CANDIDATE] #{best_idx} | matches={best_count} inliers={inlier_count} ({inlier_ratio*100:.1f}%)")
+        print(f"[LOOP CANDIDATE:camera] #{best_idx} | matches={best_count} inliers={inlier_count} ({inlier_ratio*100:.1f}%)")
 
         if inlier_count < MIN_INLIER_COUNT or inlier_ratio < MIN_INLIER_RATIO:
-            print("❌ [LOOP CLOSURE REJECTED] geometric verification failed.")
+            print("❌ [LOOP CLOSURE:camera] geometric verification failed.")
             return None
 
         matched_kf = candidates[best_idx]
@@ -432,13 +573,49 @@ class KeyframeManager:
             "y": new_kf.visualpose["y"] - matched_kf.visualpose["y"],
             "theta": new_kf.visualpose["theta"] - matched_kf.visualpose["theta"],
         }
-        print(f"✅ [LOOP CLOSURE] drift x={drift['x']:.1f} y={drift['y']:.1f} theta={np.degrees(drift['theta']):.1f}°")
-        return {"matched_kf_id": matched_kf.id, "drift": drift}
+        return {"matched_kf_id": matched_kf.id, "drift": drift, "source": "camera"}
+
+    def detect_scan_loop_closure(self, new_kf: Keyframe, candidates: list) -> Optional[dict]:
+        if not new_kf.scan_points or len(new_kf.scan_points) < self.scan_matcher.min_inlier_points:
+            return None
+
+        best = None
+        for cand in candidates:
+            if not cand.scan_points:
+                continue
+            matched, transform, residual = self.scan_matcher.match(new_kf.scan_points, cand.scan_points)
+            if matched and (best is None or residual < best["residual"]):
+                drift = {
+                    "x": new_kf.visualpose["x"] - cand.visualpose["x"] + transform["dx"],
+                    "y": new_kf.visualpose["y"] - cand.visualpose["y"] + transform["dy"],
+                    "theta": new_kf.visualpose["theta"] - cand.visualpose["theta"] + transform["dtheta"],
+                }
+                best = {"matched_kf_id": cand.id, "drift": drift, "residual": residual, "source": "odom+scan"}
+        return best
+
+    def detect_loop_closure(self, new_kf: Keyframe, current_pose: dict) -> Optional[dict]:
+        camera_result = self.detect_camera_loop_closure(new_kf)
+        if camera_result is not None:
+            print("✅ [LOOP CLOSURE] confirmed by camera (ORB + RANSAC).")
+            return camera_result
+
+        proximate = self.odometry_proximate_candidates(current_pose, ODOM_PROXIMITY_RADIUS_MM, exclude_last_n=2)
+        if not proximate:
+            return None
+
+        scan_result = self.detect_scan_loop_closure(new_kf, proximate)
+        if scan_result is not None:
+            print(f"🔶 [LOOP CLOSURE] no camera match, but odometry-proximity + ToF scan agree "
+                  f"(residual={scan_result['residual']:.1f}mm, kf#{scan_result['matched_kf_id']}) "
+                  f"— accepting as probable closure.")
+            return scan_result
+
+        return None
 
 
 # ── Wiring: hub -> odometry provider -> UI + SLAM ───────────────────────
 class RobotBackend:
-    def __init__(self, mode: OdometryMode = OdometryMode.PURE_ENCODER):
+    def __init__(self, mode: OdometryMode = OdometryMode.FUSED_VISUAL):
         self.hub = TelemetryHub()
         self.encoder_engine = EncoderOdometryEngine(WHEEL_DIAMETER_MM, TRACK_WIDTH_MM, TICKS_PER_REVOLUTION)
         self.visual_engine = VisualOdometryEngine(
@@ -447,11 +624,13 @@ class RobotBackend:
         )
         self.odometry = OdometryProvider(mode, self.encoder_engine, self.visual_engine)
         self.graph = SlamGraphManager()
-        self.keyframes = KeyframeManager(self.graph)
+        self.scan_matcher = ScanMatcher()
+        self.keyframes = KeyframeManager(self.graph, self.scan_matcher)
 
         self.browser_clients: set = set()
         self.esp32_socket = None
         self._last_gyro_time = time.time()
+        self.latest_scan_points: Optional[list] = None
 
     def set_mode(self, mode: OdometryMode):
         self.odometry.set_mode(mode)
@@ -464,29 +643,45 @@ class RobotBackend:
 
         await self.hub.ingest_telemetry(data)
 
-        frame = None
-        new_kf = None
+        new_kf_candidate = None
         if self.odometry.mode == OdometryMode.FUSED_VISUAL:
             frame = await self.hub.get_closest_frame(now)
+            if frame is not None:
+                last_kf = self.keyframes.keyframes[-1] if self.keyframes.keyframes else None
+                approx_pose = self.odometry.current_pose_dict()  # pose as of end of previous tick
+                due = (last_kf is None) or should_create_keyframe(approx_pose, last_kf.pose_at_capture)
+                if due:
+                    candidate_id = len(self.keyframes.keyframes)
+                    new_kf_candidate = Keyframe(candidate_id, frame, approx_pose)
 
-        # 1. SSOT pose update — the ONLY place x/y/theta is computed.
-        delta = self.odometry.process(data, new_kf=None)  # encoder-only tick update first
+        # 1. SSOT pose update — the ONLY place x/y/theta is computed. Visual fusion
+        #    engages here whenever a candidate keyframe is due this tick (fixes the
+        #    old hardcoded new_kf=None that silently disabled visual fusion).
+        delta = self.odometry.process(data, new_kf=new_kf_candidate)
         pose = self.odometry.current_pose_dict()
 
-        # 2. Keyframe + SLAM graph, only when a frame is available and mode is visual.
-        if frame is not None:
-            kf = self.keyframes.maybe_add_keyframe(frame, pose, delta)
-            if kf is not None and kf.id > 0:
-                loop = self.keyframes.detect_loop_closure(kf)
+        # 2. Finalize keyframe with the corrected pose + attach the latest ToF sweep
+        #    as its scan signature, add graph node/factor, then run multi-modal
+        #    loop-closure detection (camera first, odometry+scan fallback second).
+        if new_kf_candidate is not None:
+            new_kf_candidate.pose_at_capture = pose
+            new_kf_candidate.visualpose = dict(pose)
+            new_kf_candidate.scan_points = self.latest_scan_points
+
+            prev_id = self.keyframes.keyframes[-1].id if self.keyframes.keyframes else None
+            self.keyframes.add_keyframe(new_kf_candidate, prev_id, delta)
+
+            if new_kf_candidate.id > 0:
+                loop = self.keyframes.detect_loop_closure(new_kf_candidate, pose)
                 if loop is not None:
-                    self.graph.add_loop_closure_factor(kf.id, loop["matched_kf_id"], loop["drift"])
+                    self.graph.add_loop_closure_factor(new_kf_candidate.id, loop["matched_kf_id"], loop["drift"])
                     result = self.graph.optimize()
                     for stored_kf in self.keyframes.keyframes:
                         if result.exists(X(stored_kf.id)):
                             p = result.atPose2(X(stored_kf.id))
                             stored_kf.visualpose = {"x": p.x(), "y": p.y(), "theta": p.theta()}
-                    print("✅ Global trajectory corrected via graph optimization.")
-                    await self._broadcast_trajectory(kf.id, loop["matched_kf_id"])
+                    print(f"✅ Global trajectory corrected via graph optimization (source={loop['source']}).")
+                    await self._broadcast_trajectory(new_kf_candidate.id, loop["matched_kf_id"])
 
         # 3. Web UI publisher — reads the SAME pose dict the graph just used.
         await self._broadcast_telemetry(data, pose)
@@ -513,11 +708,15 @@ class RobotBackend:
         websockets.broadcast(self.browser_clients, payload)
 
     async def handle_scan(self, message: str, data: dict):
+        """Re-stamp the ToF sweep with the current SSOT pose, store it (in world
+        frame) for the next keyframe's scan signature, then forward to browsers."""
+        pose_rad = self.odometry.current_pose_dict()  # radians — internal representation
+        self.latest_scan_points = scan_to_world_points(pose_rad, data.get("measure", []))
+
         if self.browser_clients:
-            pose = self.odometry.current_pose_dict()
-            data["x"] = pose["x"]
-            data["y"] = pose["y"]
-            data["theta"] = np.degrees(pose["theta"])
+            data["x"] = pose_rad["x"]
+            data["y"] = pose_rad["y"]
+            data["theta"] = np.degrees(pose_rad["theta"])
             websockets.broadcast(self.browser_clients, json.dumps(data))
 
     async def handle_client(self, websocket):
@@ -536,11 +735,11 @@ class RobotBackend:
                 except json.JSONDecodeError:
                     print(f"[BROWSER→ESP32] {message}")
                     if message == "RESET":
-                        self.odometry.pose = GlobalPose()
-                        self.odometry._prev_ticks_left = None
-                        self.odometry._prev_ticks_right = None
-                        self.keyframes.keyframes.clear()
-                        print("[SSOT] Pose provider reset alongside ESP32.")
+                        self.odometry.reset()
+                        self.keyframes.reset()
+                        self.graph.reset()
+                        self.latest_scan_points = None
+                        print("[SSOT] Pose provider + SLAM graph reset alongside ESP32.")
                     if self.esp32_socket:
                         await self.esp32_socket.send(message)
                     continue
@@ -562,59 +761,59 @@ class RobotBackend:
                 print(f"[BROWSER] Disconnected. Total: {len(self.browser_clients)}")
 
     async def fetch_camera_frames(self):
-            """Continuously pulls frames from a persistent MJPEG stream."""
-            loop = asyncio.get_running_loop()
-            
-            def read_mjpeg_stream():
-                # Standard IP Webcam endpoints: /video or /videofeed
-                stream_url = "http://10.129.54.209:8080/video"
-                print(f"🔄 [CAMERA] Connecting to persistent stream at {stream_url}...")
-                
-                while True:
-                    try:
-                        # stream=True keeps ONE single HTTP connection open
-                        response = requests.get(stream_url, stream=True, timeout=5)
-                        if response.status_code != 200:
-                            print(f"❌ [CAMERA] HTTP {response.status_code} error. Retrying...")
-                            time.sleep(1)
-                            continue
+        """Continuously pulls frames from a persistent MJPEG stream, resizing
+        each one to match the intrinsics calibrated for _RESIZE_TARGET_WIDTH."""
+        loop = asyncio.get_running_loop()
 
-                        print("✅ [CAMERA] Persistent stream connected successfully!")
-                        bytes_buffer = b""
-
-                        # Read the raw MJPEG byte stream continuously
-                        for chunk in response.iter_content(chunk_size=4096):
-                            bytes_buffer += chunk
-                            start = bytes_buffer.find(b'\xff\xd8')  # JPEG start tag
-                            end = bytes_buffer.find(b'\xff\xd9')    # JPEG end tag
-
-                            if start != -1 and end != -1:
-                                jpg_data = bytes_buffer[start:end + 2]
-                                bytes_buffer = bytes_buffer[end + 2:]
-
-                                # Decode frame directly from memory
-                                img_array = np.frombuffer(jpg_data, dtype=np.uint8)
-                                frame = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
-
-                                if frame is not None:
-                                    asyncio.run_coroutine_threadsafe(
-                                        self.hub.ingest_frame(frame, time.time()), 
-                                        loop
-                                    )
-
-                    except Exception as e:
-                        print(f"❌ [CAMERA] Connection error: {e}. Reconnecting in 1s...")
+        def read_mjpeg_stream():
+            print(f"🔄 [CAMERA] Connecting to persistent stream at {PHONE_STREAM_URL}...")
+            while True:
+                try:
+                    response = requests.get(PHONE_STREAM_URL, stream=True, timeout=5)
+                    if response.status_code != 200:
+                        print(f"❌ [CAMERA] HTTP {response.status_code} error. Retrying...")
                         time.sleep(1)
+                        continue
 
-            await loop.run_in_executor(None, read_mjpeg_stream)
+                    print("✅ [CAMERA] Persistent stream connected successfully!")
+                    bytes_buffer = b""
+
+                    for chunk in response.iter_content(chunk_size=4096):
+                        bytes_buffer += chunk
+                        start = bytes_buffer.find(b'\xff\xd8')
+                        end = bytes_buffer.find(b'\xff\xd9')
+
+                        if start != -1 and end != -1:
+                            jpg_data = bytes_buffer[start:end + 2]
+                            bytes_buffer = bytes_buffer[end + 2:]
+
+                            img_array = np.frombuffer(jpg_data, dtype=np.uint8)
+                            frame = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
+
+                            if frame is not None:
+                                scale = _RESIZE_TARGET_WIDTH / frame.shape[1]
+                                frame = cv2.resize(frame, (_RESIZE_TARGET_WIDTH, int(frame.shape[0] * scale)))
+                                asyncio.run_coroutine_threadsafe(
+                                    self.hub.ingest_frame(frame, time.time()),
+                                    loop,
+                                )
+
+                except Exception as e:
+                    print(f"❌ [CAMERA] Connection error: {e}. Reconnecting in 1s...")
+                    time.sleep(1)
+
+        await loop.run_in_executor(None, read_mjpeg_stream)
 
 
 async def main():
-    backend = RobotBackend(mode=OdometryMode.PURE_ENCODER)  # flip to FUSED_VISUAL when ready
-    asyncio.create_task(backend.fetch_camera_frames())
+    backend = RobotBackend(mode=OdometryMode.FUSED_VISUAL)
     async with websockets.serve(backend.handle_client, "0.0.0.0", PYTHON_WS_PORT):
         print(f"[PYTHON] SSOT server running on port {PYTHON_WS_PORT}")
-        await asyncio.Future()
+        # Camera task created AFTER server is listening — both run concurrently
+        await asyncio.gather(
+            backend.fetch_camera_frames(),
+            asyncio.Future(),   # keeps the server alive forever
+        )
 
 
 if __name__ == "__main__":
