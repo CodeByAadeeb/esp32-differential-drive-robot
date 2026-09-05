@@ -37,6 +37,11 @@
           <span class="map-scale" id="mapScale">RANGE —</span>
         </div>
         <canvas id="mapCanvas"></canvas>
+        <div class="map-layer-toggles">
+          <button class="layer-btn active" id="btnRaw" onclick="toggleLayer('raw')">RAW</button>
+          <button class="layer-btn active" id="btnSLAM" onclick="toggleLayer('slam')">SLAM</button>
+          <button class="layer-btn active" id="btnBoth" onclick="toggleLayer('both')">BOTH</button>
+        </div>
       </div>
 
       <div class="main-col">
@@ -230,6 +235,7 @@
     let liveScanTrail  = [];   // {x, y} — trailing buffer of the single live x_scan/y_scan point (blue)
     let sweepHistory   = [];   // [{points:[{x,y}...], gen:number}] — one entry per completed SCAN sweep (green, fades with age)
     let sweepGenCounter = 0;
+    let mapLayerMode = 'both';  // 'raw', 'slam', or 'both'
 
     // Pose-graph (visual SLAM) state — populated by TRAJECTORY_UPDATE messages
     let poseGraphNodes  = [];  // [{id, x, y, theta}, ...] most recent optimized trajectory
@@ -257,6 +263,14 @@
       if (mapOpen) requestAnimationFrame(resizeMapCanvas);
     }
 
+    function toggleLayer(mode) {
+        mapLayerMode = mode;
+        document.getElementById('btnRaw').classList.toggle('active', mode === 'raw' || mode === 'both');
+        document.getElementById('btnSLAM').classList.toggle('active', mode === 'slam' || mode === 'both');
+        document.getElementById('btnBoth').classList.toggle('active', mode === 'both');
+        drawMap();
+    }
+
     function resizeMapCanvas() {
       const rect = mapCanvas.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
@@ -282,8 +296,8 @@
       legend.innerHTML =
         '<span style="color:#3dff70">●</span> odometry &nbsp;' +
         '<span style="color:#4da6ff">●</span> live scan &nbsp;' +
-        '<span style="color:#00ff66">●</span> ToF sweep &nbsp;' +
-        '<span style="color:#ff33e6">●</span> pose graph';
+        '<span style="color:#00ff66">●</span> raw ToF &nbsp;' +
+        '<span style="color:#ff33e6">●</span> SLAM corrected';
       if (getComputedStyle(mapPanel).position === 'static') {
         mapPanel.style.position = 'relative';
       }
@@ -298,30 +312,37 @@
 
       const cx = w / 2, cy = h / 2;
 
-      // Auto-scale: fit the furthest excursion in either axis, with a floor
-      // so we don't zoom in crazily on the first couple of readings.
-      let maxExtent = 100; // mm
-      const track = (p) => {
-        if (Math.abs(p.x) > maxExtent) maxExtent = Math.abs(p.x);
-        if (Math.abs(p.y) > maxExtent) maxExtent = Math.abs(p.y);
-      };
-      for (const p of pathHistory) track(p);
-      for (const p of obstaclePoints) track(p);
-      for (const p of liveScanTrail) track(p);
-      for (const s of sweepHistory) for (const p of s.points) track(p);
-      for (const n of poseGraphNodes) track(n);
+      let maxExtentRaw  = 100;
+      let maxExtentSLAM = 100;
+
+      const trackRaw  = (p) => { if (Math.abs(p.x) > maxExtentRaw)  maxExtentRaw  = Math.abs(p.x); if (Math.abs(p.y) > maxExtentRaw)  maxExtentRaw  = Math.abs(p.y); };
+      const trackSLAM = (p) => { if (Math.abs(p.x) > maxExtentSLAM) maxExtentSLAM = Math.abs(p.x); if (Math.abs(p.y) > maxExtentSLAM) maxExtentSLAM = Math.abs(p.y); };
+
+      for (const p of pathHistory) trackRaw(p);
+      for (const p of liveScanTrail) trackRaw(p);
+      for (const s of sweepHistory) if (!s.corrected) for (const p of s.points) trackRaw(p);
+
+      for (const n of poseGraphNodes) trackSLAM(n);
+      for (const s of sweepHistory) if (s.corrected) for (const p of s.points) {
+          if (Math.abs(p.x) < 5000 && Math.abs(p.y) < 5000) trackSLAM(p);
+      }
+
+      // Pick scale based on active mode
+      let maxExtent;
+      if (mapLayerMode === 'raw')  maxExtent = maxExtentRaw;
+      else if (mapLayerMode === 'slam') maxExtent = maxExtentSLAM;
+      else maxExtent = Math.max(maxExtentRaw, maxExtentSLAM);  // BOTH — use larger
+
+      const showRaw  = mapLayerMode === 'raw'  || mapLayerMode === 'both';
+      const showSLAM = mapLayerMode === 'slam' || mapLayerMode === 'both';
 
       const margin = 22;
       const scale = (Math.min(w, h) / 2 - margin) / maxExtent;
       mapScaleLbl.textContent = 'RANGE ' + Math.round(maxExtent * 2) + 'mm';
 
-      // Screen mapping: forward (+X) = up, left (+Y) = left
-      const toScreen = (rx, ry) => ({
-        sx: cx - ry * scale,
-        sy: cy - rx * scale
-      });
+      const toScreen = (rx, ry) => ({ sx: cx - ry * scale, sy: cy - rx * scale });
 
-      // Crosshair through origin
+      // Crosshair
       mapCtx.strokeStyle = 'rgba(58,90,58,0.4)';
       mapCtx.lineWidth = 1;
       mapCtx.beginPath();
@@ -329,126 +350,137 @@
       mapCtx.moveTo(0, cy); mapCtx.lineTo(w, cy);
       mapCtx.stroke();
 
-      // Origin marker
+      // Origin
       mapCtx.fillStyle = '#e8a020';
       mapCtx.beginPath();
       mapCtx.arc(cx, cy, 4, 0, Math.PI * 2);
       mapCtx.fill();
 
-      // Raw encoder/odometry path
-      if (pathHistory.length > 1) {
-        mapCtx.strokeStyle = '#3dff70';
-        mapCtx.lineWidth = 1.5;
-        mapCtx.shadowColor = 'rgba(61,255,112,0.5)';
-        mapCtx.shadowBlur = 4;
-        mapCtx.beginPath();
-        const first = toScreen(pathHistory[0].x, pathHistory[0].y);
-        mapCtx.moveTo(first.sx, first.sy);
-        for (let i = 1; i < pathHistory.length; i++) {
-          const p = toScreen(pathHistory[i].x, pathHistory[i].y);
-          mapCtx.lineTo(p.sx, p.sy);
-        }
-        mapCtx.stroke();
-        mapCtx.shadowBlur = 0;
-      }
-
-      // Obstacle points (reserved — currently no message type populates this)
-      if (obstaclePoints.length > 0) {
-        mapCtx.fillStyle = '#ff3b3b';
-        for (const p of obstaclePoints) {
-          const s = toScreen(p.x, p.y);
+      // ── RAW LAYER ───────────────────────────────────────────
+      if (showRaw) {
+        // Encoder path (green line)
+        if (pathHistory.length > 1) {
+          mapCtx.strokeStyle = '#3dff70';
+          mapCtx.lineWidth = 1.5;
+          mapCtx.shadowColor = 'rgba(61,255,112,0.5)';
+          mapCtx.shadowBlur = 4;
           mapCtx.beginPath();
-          mapCtx.arc(s.sx, s.sy, 2, 0, Math.PI * 2);
-          mapCtx.fill();
+          const first = toScreen(pathHistory[0].x, pathHistory[0].y);
+          mapCtx.moveTo(first.sx, first.sy);
+          for (let i = 1; i < pathHistory.length; i++) {
+            const p = toScreen(pathHistory[i].x, pathHistory[i].y);
+            mapCtx.lineTo(p.sx, p.sy);
+          }
+          mapCtx.stroke();
+          mapCtx.shadowBlur = 0;
         }
-      }
 
-      // Completed ToF sweeps — one full SCAN batch each, older ones fade out
-      if (sweepHistory.length > 0) {
-        const newestGen = sweepHistory[sweepHistory.length - 1].gen;
-        for (const sweep of sweepHistory) {
-          const age = newestGen - sweep.gen; // 0 = newest
-          mapCtx.globalAlpha = Math.max(0.15, 1 - age * 0.12);
-          mapCtx.fillStyle = '#00ff66';
-          for (const p of sweep.points) {
+        // Raw ToF sweeps (green dots, fading)
+        if (sweepHistory.length > 0) {
+          const newestGen = sweepHistory[sweepHistory.length - 1].gen;
+          for (const sweep of sweepHistory) {
+            if (sweep.corrected) continue;  // skip corrected sweeps in raw layer
+            const age = newestGen - sweep.gen;
+            mapCtx.globalAlpha = Math.max(0.15, 1 - age * 0.12);
+            mapCtx.fillStyle = '#00ff66';
+            for (const p of sweep.points) {
+                if (Math.abs(p.x) > 3000 || Math.abs(p.y) > 3000) continue;  // skip outliers
+                const s = toScreen(p.x, p.y);
+                mapCtx.beginPath();
+                mapCtx.arc(s.sx, s.sy, 2.5, 0, Math.PI * 2);
+                mapCtx.fill();
+            }
+          }
+          mapCtx.globalAlpha = 1;
+        }
+
+        // Live scan trail (blue)
+        if (liveScanTrail.length > 0) {
+          for (let i = 0; i < liveScanTrail.length; i++) {
+            const p = liveScanTrail[i];
+            const isLatest = i === liveScanTrail.length - 1;
             const s = toScreen(p.x, p.y);
+            mapCtx.globalAlpha = isLatest ? 1 : 0.35;
+            mapCtx.fillStyle = '#4da6ff';
             mapCtx.beginPath();
-            mapCtx.arc(s.sx, s.sy, 2.5, 0, Math.PI * 2);
+            mapCtx.arc(s.sx, s.sy, isLatest ? 4 : 2, 0, Math.PI * 2);
             mapCtx.fill();
           }
+          mapCtx.globalAlpha = 1;
         }
-        mapCtx.globalAlpha = 1;
       }
 
-      // Live single-point scan (direct x_scan/y_scan from the telemetry stream)
-      if (liveScanTrail.length > 0) {
-        for (let i = 0; i < liveScanTrail.length; i++) {
-          const p = liveScanTrail[i];
-          const isLatest = i === liveScanTrail.length - 1;
-          const s = toScreen(p.x, p.y);
-          mapCtx.globalAlpha = isLatest ? 1 : 0.35;
-          mapCtx.fillStyle = '#4da6ff';
+      // ── SLAM LAYER ──────────────────────────────────────────
+      if (showSLAM) {
+          // Corrected scan points from SLAM (magenta dots)
+          for (const sweep of sweepHistory) {
+              if (!sweep.corrected) continue;
+              mapCtx.fillStyle = '#ff33e6';
+              mapCtx.globalAlpha = 0.7;
+              for (const p of sweep.points) {
+                  if (Math.abs(p.x) > 3000 || Math.abs(p.y) > 3000) continue;
+                  const s = toScreen(p.x, p.y);
+                  mapCtx.beginPath();
+                  mapCtx.arc(s.sx, s.sy, 2.5, 0, Math.PI * 2);
+                  mapCtx.fill();
+              }
+          }
+          mapCtx.globalAlpha = 1;
+
+        // Pose graph trajectory (magenta line + nodes)
+        if (poseGraphNodes.length > 0) {
+          const flashing = performance.now() < loopFlashUntil;
+          mapCtx.strokeStyle = flashing ? '#ffffff' : '#ff33e6';
+          mapCtx.lineWidth = flashing ? 3 : 1.5;
+          mapCtx.shadowColor = 'rgba(255,51,230,0.7)';
+          mapCtx.shadowBlur = flashing ? 10 : 3;
           mapCtx.beginPath();
-          mapCtx.arc(s.sx, s.sy, isLatest ? 4 : 2, 0, Math.PI * 2);
-          mapCtx.fill();
-        }
-        mapCtx.globalAlpha = 1;
-      }
+          const first = toScreen(poseGraphNodes[0].x, poseGraphNodes[0].y);
+          mapCtx.moveTo(first.sx, first.sy);
+          for (let i = 1; i < poseGraphNodes.length; i++) {
+            const p = toScreen(poseGraphNodes[i].x, poseGraphNodes[i].y);
+            mapCtx.lineTo(p.sx, p.sy);
+          }
+          mapCtx.stroke();
+          mapCtx.shadowBlur = 0;
 
-      // Pose-graph trajectory (visual SLAM) — corrected whenever a loop closure lands
-      if (poseGraphNodes.length > 0) {
-        const flashing = performance.now() < loopFlashUntil;
-        mapCtx.strokeStyle = flashing ? '#ffffff' : '#ff33e6';
-        mapCtx.lineWidth = flashing ? 3 : 1.5;
-        mapCtx.shadowColor = 'rgba(255,51,230,0.7)';
-        mapCtx.shadowBlur = flashing ? 10 : 3;
-        mapCtx.beginPath();
-        const first = toScreen(poseGraphNodes[0].x, poseGraphNodes[0].y);
-        mapCtx.moveTo(first.sx, first.sy);
-        for (let i = 1; i < poseGraphNodes.length; i++) {
-          const p = toScreen(poseGraphNodes[i].x, poseGraphNodes[i].y);
-          mapCtx.lineTo(p.sx, p.sy);
-        }
-        mapCtx.stroke();
-        mapCtx.shadowBlur = 0;
+          mapCtx.fillStyle = '#ff33e6';
+          for (const n of poseGraphNodes) {
+            const s = toScreen(n.x, n.y);
+            mapCtx.fillRect(s.sx - 2.5, s.sy - 2.5, 5, 5);
+          }
 
-        mapCtx.fillStyle = '#ff33e6';
-        for (const n of poseGraphNodes) {
-          const s = toScreen(n.x, n.y);
-          mapCtx.fillRect(s.sx - 2.5, s.sy - 2.5, 5, 5);
-        }
-
-        // Highlight the specific loop-closure edge (drawn as a straight dashed line
-        // between the two matched keyframes, independent of trajectory order)
-        if (loopEdge) {
-          const nodeA = poseGraphNodes.find(n => n.id === loopEdge.from);
-          const nodeB = poseGraphNodes.find(n => n.id === loopEdge.to);
-          if (nodeA && nodeB) {
-            const a = toScreen(nodeA.x, nodeA.y);
-            const b = toScreen(nodeB.x, nodeB.y);
-            mapCtx.save();
-            mapCtx.strokeStyle = '#ffee00';
-            mapCtx.lineWidth = 2;
-            mapCtx.setLineDash([4, 4]);
-            mapCtx.shadowColor = 'rgba(255,238,0,0.8)';
-            mapCtx.shadowBlur = flashing ? 8 : 2;
-            mapCtx.beginPath();
-            mapCtx.moveTo(a.sx, a.sy);
-            mapCtx.lineTo(b.sx, b.sy);
-            mapCtx.stroke();
-            mapCtx.restore();
-
-            mapCtx.fillStyle = '#ffee00';
-            [a, b].forEach(s => {
+          // Loop closure edge (yellow dashed)
+          if (loopEdge) {
+            const nodeA = poseGraphNodes.find(n => n.id === loopEdge.from);
+            const nodeB = poseGraphNodes.find(n => n.id === loopEdge.to);
+            if (nodeA && nodeB) {
+              const a = toScreen(nodeA.x, nodeA.y);
+              const b = toScreen(nodeB.x, nodeB.y);
+              mapCtx.save();
+              mapCtx.strokeStyle = '#ffee00';
+              mapCtx.lineWidth = 2;
+              mapCtx.setLineDash([4, 4]);
+              mapCtx.shadowColor = 'rgba(255,238,0,0.8)';
+              mapCtx.shadowBlur = flashing ? 8 : 2;
               mapCtx.beginPath();
-              mapCtx.arc(s.sx, s.sy, 4, 0, Math.PI * 2);
-              mapCtx.fill();
-            });
+              mapCtx.moveTo(a.sx, a.sy);
+              mapCtx.lineTo(b.sx, b.sy);
+              mapCtx.stroke();
+              mapCtx.restore();
+
+              mapCtx.fillStyle = '#ffee00';
+              [a, b].forEach(s => {
+                mapCtx.beginPath();
+                mapCtx.arc(s.sx, s.sy, 4, 0, Math.PI * 2);
+                mapCtx.fill();
+              });
+            }
           }
         }
       }
 
-      // Current position + heading arrow
+      // Current robot position arrow (always shown)
       if (pathHistory.length > 0) {
         const last = pathHistory[pathHistory.length - 1];
         const pos  = toScreen(last.x, last.y);
@@ -636,6 +668,18 @@
       console.log('keyframes:', poseGraphNodes);
       console.groupEnd();
 
+      console.group('🗺️ TRAJECTORY UPDATE DEBUG');
+      console.log('total keyframes:', d.keyframes.length);
+      console.log('corrected scan sample kf[0]:', d.keyframes[0]?.scan_points?.slice(0, 3));
+      console.log('corrected scan sample kf[1]:', d.keyframes[1]?.scan_points?.slice(0, 3));
+      const allPts = d.keyframes.flatMap(k => k.scan_points || []);
+      const xs = allPts.map(p => p[0]);
+      const ys = allPts.map(p => p[1]);
+      console.log('total corrected points:', allPts.length);
+      console.log('X range:', Math.min(...xs).toFixed(0), 'to', Math.max(...xs).toFixed(0));
+      console.log('Y range:', Math.min(...ys).toFixed(0), 'to', Math.max(...ys).toFixed(0));
+      console.groupEnd();
+
       startFlashLoop();
       if (shouldDraw()) drawMap();
     }
@@ -751,7 +795,6 @@
       const el = document.getElementById(btnId);
       if (el) releaseBtn(el);
     });
-
     // Initial setup
     mapToggleBtn.style.display = isDesktopLayout() ? 'none' : '';
     ensureLegend();
