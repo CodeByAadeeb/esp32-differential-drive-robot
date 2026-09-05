@@ -46,7 +46,7 @@ CAMERA_OFFSET_X_MM = -25.0  # forward(+)/behind(-) robot center
 CAMERA_OFFSET_Y_MM = 70.0   # left(+)/right(-) of robot center
 
 KEYFRAME_MIN_DIST_MM = 150.0
-KEYFRAME_MIN_ANGLE_DEG = 11.0
+KEYFRAME_MIN_ANGLE_DEG = 5.0  # lower from 11 to test
 
 # Camera loop-closure thresholds — kept internally consistent: inlier requirement
 # stays BELOW the match requirement (inliers can never exceed total matches), and
@@ -58,7 +58,7 @@ MIN_INLIER_COUNT = 8
 MIN_INLIER_RATIO = 0.30 # was 0.5
 
 # Odometry-proximity + ToF scan-matching loop closure (fallback when camera doesn't confirm).
-ODOM_PROXIMITY_RADIUS_MM = 1000.0 #800.0
+ODOM_PROXIMITY_RADIUS_MM = 800.0 #800.0
 SCAN_LOOP_SKIP_RECENT = 5 # 10
 SCAN_MIN_RANGE_MM = 20.0
 SCAN_MAX_RANGE_MM = 1000.0
@@ -66,7 +66,7 @@ SCAN_MATCH_SEARCH_XY_MM = 300.0
 SCAN_MATCH_XY_STEP_MM = 50.0
 SCAN_MATCH_SEARCH_THETA_DEG = 20.0
 SCAN_MATCH_THETA_STEP_DEG = 5.0
-SCAN_MATCH_MAX_RESIDUAL_MM = 100.0 #80.0
+SCAN_MATCH_MAX_RESIDUAL_MM = 70.0 #80.0
 SCAN_MATCH_MIN_INLIER_POINTS = 4 #6
 OFFSET = 10.0
 
@@ -455,7 +455,7 @@ class ScanFrame:
         self.id = scan_id
         self.raw_sweep = raw_sweep  # 1D array of millimeter distances
         self.corrected_scan_points = None
-        self.pose_at_capture = pose_at_capture
+        self.pose_at_capture = dict(pose_at_capture)  # frozen copy, not reference
         self.corrected_pose = dict(pose_at_capture)
         base_loop_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([1.0, 1.0, np.radians(0.5)]))
         self.loop_noise = gtsam.noiseModel.Robust.Create(
@@ -787,6 +787,8 @@ class ScanManager:
         out = []
         pool = self.scans[:-exclude_last_n] if exclude_last_n > 0 else self.scans
         for scan in pool:
+            if not scan.raw_sweep:  # skip turn nodes
+                continue
             dx = current_pose["x"] - scan.pose_at_capture["x"]
             dy = current_pose["y"] - scan.pose_at_capture["y"]
             if (dx * dx + dy * dy) ** 0.5 <= radius_mm:
@@ -892,6 +894,7 @@ class RobotBackend:
             self.latest_scan_points: Optional[list] = None
             self.latest_raw_sweep: Optional[list] = None
             self.has_new_sweep: bool = False 
+            self._last_turn_theta_deg = None
 
     def set_mode(self, mode: OdometryMode): # --- doubt --- who is calling this function in this code right now?
         self.odometry.set_mode(mode)
@@ -906,7 +909,7 @@ class RobotBackend:
             
             # 🟢 1. UNCOMMENTED: SSOT pose update from encoder/gyro data
             self.odometry.process(data, new_kf=None)
-            pose = self.odometry.current_pose_dict()
+            pose = dict(self.odometry.current_pose_dict())
 
             # 🟢 2. ONLY create a ToF ScanFrame when a fresh ESP32 sweep JSON has arrived
             new_scan_candidate = None
@@ -918,39 +921,64 @@ class RobotBackend:
                 self.has_new_sweep = False
                 self.latest_raw_sweep = None
 
-            if new_scan_candidate is not None:
-                prev_scan = self.tof_scans.scans[-1] if self.tof_scans.scans else None
-                self.tof_scans.add_graph_node(new_scan_candidate, prev_scan)
+                if new_scan_candidate is not None:
+                    prev_scan = self.tof_scans.scans[-1] if self.tof_scans.scans else None
+                    self.tof_scans.add_graph_node(new_scan_candidate, prev_scan)
 
-                if new_scan_candidate.id > 0:
-                    candidates = self.tof_scans.odometry_proximate_candidates(
-                        pose, ODOM_PROXIMITY_RADIUS_MM, exclude_last_n=SCAN_LOOP_SKIP_RECENT
-                    )
-                    loop = self.tof_scans.detect_scan_loop_closure(new_scan_candidate, candidates)
-                    if loop is not None:
-                        self.tof_graph.add_lpenc_fac(new_scan_candidate.id, loop["matched_kf_id"], loop["drift"])
-                        result = self.tof_graph.run_optimization()
-                        for stored_scan in self.tof_scans.scans:
-                            if result.exists(X(stored_scan.id)):
-                                p = result.atPose2(X(stored_scan.id))
-                                stored_scan.corrected_pose = {"x": p.x(), "y": p.y(), "theta": p.theta()}
-                                for stored_scan in self.tof_scans.scans:
-                                    if result.exists(X(stored_scan.id)):
-                                        p = result.atPose2(X(stored_scan.id))
-                                        stored_scan.corrected_pose = {
-                                            "x": p.x(), "y": p.y(), "theta": p.theta()
-                                        }
-                                        # Reproject scan points using corrected pose
-                                        if stored_scan.raw_sweep:
-                                            stored_scan.corrected_scan_points = scan_to_world_points(
-                                                stored_scan.corrected_pose, stored_scan.raw_sweep
-                                            )
-                        p_from = result.atPose2(X(new_scan_candidate.id))
-                        p_to   = result.atPose2(X(loop["matched_kf_id"]))
-                        dist = math.hypot(p_from.x() - p_to.x(), p_from.y() - p_to.y())
-                        print(f"Post-optimization gap between loop nodes: {dist:.1f}mm")
-                        print(f"✅ ToF trajectory corrected via graph optimization (source={loop['source']}).")
-                        await self._broadcast_trajectory(new_scan_candidate.id, loop["matched_kf_id"], source="tof")
+                    if new_scan_candidate.id > 0:
+                        candidates = self.tof_scans.odometry_proximate_candidates(
+                            pose, ODOM_PROXIMITY_RADIUS_MM, exclude_last_n=SCAN_LOOP_SKIP_RECENT
+                        )
+                        loop = self.tof_scans.detect_scan_loop_closure(new_scan_candidate, candidates)
+                        if loop is not None:
+                            self.tof_graph.add_lpenc_fac(new_scan_candidate.id, loop["matched_kf_id"], loop["drift"])
+                            result = self.tof_graph.run_optimization()
+                            for stored_scan in self.tof_scans.scans:
+                                if result.exists(X(stored_scan.id)):
+                                    p = result.atPose2(X(stored_scan.id))
+                                    stored_scan.corrected_pose = {"x": p.x(), "y": p.y(), "theta": p.theta()}
+                                    for stored_scan in self.tof_scans.scans:
+                                        if result.exists(X(stored_scan.id)):
+                                            p = result.atPose2(X(stored_scan.id))
+                                            stored_scan.corrected_pose = {
+                                                "x": p.x(), "y": p.y(), "theta": p.theta()
+                                            }
+                                            # Reproject scan points using corrected pose
+                                            if stored_scan.raw_sweep:
+                                                stored_scan.corrected_scan_points = scan_to_world_points(
+                                                    stored_scan.corrected_pose, stored_scan.raw_sweep
+                                                )
+                            p_from = result.atPose2(X(new_scan_candidate.id))
+                            p_to   = result.atPose2(X(loop["matched_kf_id"]))
+                            dist = math.hypot(p_from.x() - p_to.x(), p_from.y() - p_to.y())
+                            print(f"Post-optimization gap between loop nodes: {dist:.1f}mm")
+                            print(f"✅ ToF trajectory corrected via graph optimization (source={loop['source']}).")
+                            await self._broadcast_trajectory(new_scan_candidate.id, loop["matched_kf_id"], source="tof")
+
+                # Turn node — create odometry-only graph node when robot rotates significantly
+                # without a new scan (captures turns that happen between scan stops)
+            new_scan_this_tick = new_scan_candidate is not None
+            if not new_scan_this_tick and self.tof_scans.scans:
+                # Find last scan with actual sweep data (not a turn node)
+                last_real_scan = next(
+                    (s for s in reversed(self.tof_scans.scans) if s.raw_sweep),
+                    None
+                )
+                if last_real_scan is None:
+                    pass
+                else:
+                    last_theta = last_real_scan.pose_at_capture.get("theta", 0)
+                    current_theta = pose.get("theta", 0)
+                    angle_diff_deg = abs(math.degrees(current_theta) - math.degrees(last_theta))
+                    if angle_diff_deg > 180:
+                        angle_diff_deg = 360 - angle_diff_deg
+                    if angle_diff_deg > KEYFRAME_MIN_ANGLE_DEG:
+                        turn_id = len(self.tof_scans.scans)
+                        turn_node = ScanFrame(turn_id, [], pose)
+                        self.tof_scans.add_graph_node(turn_node, self.tof_scans.scans[-1])
+                        self._last_turn_theta_deg = current_theta 
+                        print(f"[TURN NODE] #{turn_id} added at ({pose['x']:.1f}, {pose['y']:.1f}) angle_diff={angle_diff_deg:.1f}°")
+
 
             # 3. Web UI publisher — reads the updated pose dict
             await self._broadcast_telemetry(data, pose)
