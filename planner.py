@@ -504,7 +504,9 @@ class SlamGraphManager:
     def run_optimization(self):
         params = gtsam.LevenbergMarquardtParams()
         optimizer = gtsam.LevenbergMarquardtOptimizer(self.graph, self.values, params) # Fixed self.values
+        print(f"Graph error before: {optimizer.error():.2f}")
         result = optimizer.optimize()
+        print(f"Graph error after:  {self.graph.error(result):.2f}")
         self.values = result
         return result
 
@@ -943,6 +945,10 @@ class RobotBackend:
                                             stored_scan.corrected_scan_points = scan_to_world_points(
                                                 stored_scan.corrected_pose, stored_scan.raw_sweep
                                             )
+                        p_from = result.atPose2(X(new_scan_candidate.id))
+                        p_to   = result.atPose2(X(loop["matched_kf_id"]))
+                        dist = math.hypot(p_from.x() - p_to.x(), p_from.y() - p_to.y())
+                        print(f"Post-optimization gap between loop nodes: {dist:.1f}mm")
                         print(f"✅ ToF trajectory corrected via graph optimization (source={loop['source']}).")
                         await self._broadcast_trajectory(new_scan_candidate.id, loop["matched_kf_id"], source="tof")
 
@@ -1098,7 +1104,7 @@ async def main():
         print(f"[PYTHON] SSOT server running on port {PYTHON_WS_PORT}")
         # Camera task created AFTER server is listening — both run concurrently
         await asyncio.gather(
-            backend.fetch_camera_frames(),
+            #backend.fetch_camera_frames(),
             backend.start_log_broadcaster(),
             asyncio.Future(),   # keeps the server alive forever
         )
