@@ -104,6 +104,9 @@
     extern bool is_sweeping;
     extern bool perm_to_scan;
     extern uint16_t scan_array[ServoArraySize];
+    extern unsigned long stationary_since_ms;
+    extern const unsigned long SCAN_START_DELAY_MS;
+    extern bool was_moving;
 
     void setMotors(int left_speed, int right_speed);
     void onWebSocketEvent(uint8_t client_num, WStype_t type, uint8_t *payload, size_t length);

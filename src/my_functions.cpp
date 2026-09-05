@@ -74,6 +74,9 @@ uint16_t sweep_distances[SWEEP_SAMPLES];
 bool is_sweeping = false;
 bool perm_to_scan = true;
 uint16_t scan_array[ServoArraySize] = {0};
+unsigned long stationary_since_ms = 0;
+const unsigned long SCAN_START_DELAY_MS = 1200;  // robot must be still for 2 seconds before scan starts
+bool was_moving = false;
 
 void setMotors(int left_speed, int right_speed) {
   

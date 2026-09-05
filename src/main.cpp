@@ -240,8 +240,23 @@ void loop() {
       }
     }
 
-    if (abs(delta_s) > 0.5){
-      perm_to_scan = true;
+    if (abs(delta_s) > 0.5) {
+        was_moving = true;
+        stationary_since_ms = 0;  // reset timer while moving
+        perm_to_scan = false;     // cancel any pending scan while moving
+    } else {
+        // Robot is stationary
+        if (was_moving) {
+            // Just stopped — start the stationary timer
+            stationary_since_ms = millis();
+            was_moving = false;
+        }
+        // Only allow scanning after stationary for SCAN_START_DELAY_MS
+        if (stationary_since_ms > 0 && 
+            (millis() - stationary_since_ms) >= SCAN_START_DELAY_MS) {
+            perm_to_scan = true;
+            stationary_since_ms = 0;
+        }
     }
 
     // scan coordinates (still projected from ESP-local pose — see note above)

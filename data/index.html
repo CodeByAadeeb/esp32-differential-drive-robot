@@ -249,7 +249,7 @@
     const MIN_SENSOR_RANGE = 20;    // ignore readings below 20mm (too close, likely invalid)
     let lastTheta   = 0;    // degrees
     let mapOpen     = false;
-    const MAX_POINTS = 3000;
+    const MAX_POINTS = 5000;
     const DESKTOP_BREAKPOINT = 700;
 
     function isDesktopLayout() {
@@ -331,7 +331,7 @@
       let maxExtent;
       if (mapLayerMode === 'raw')  maxExtent = maxExtentRaw;
       else if (mapLayerMode === 'slam') maxExtent = maxExtentSLAM;
-      else maxExtent = Math.max(maxExtentRaw, maxExtentSLAM);  // BOTH — use larger
+      else maxExtent = maxExtentRaw;  // BOTH — scale to raw data, SLAM points clip if outside
 
       const showRaw  = mapLayerMode === 'raw'  || mapLayerMode === 'both';
       const showSLAM = mapLayerMode === 'slam' || mapLayerMode === 'both';
