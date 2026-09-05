@@ -120,6 +120,14 @@
               <span class="btn-lbl">FWD</span>
             </button>
 
+            <button class="btn btn-dir" id="btnNW"
+              data-cmd="FORWARD_LEFT"
+              ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+              onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+              <span class="btn-arrow">↖</span>
+              <span class="btn-lbl">N-W</span>
+            </button>
+
             <!-- Middle row -->
             <button class="btn btn-dir" id="btnLeft"
               data-cmd="LEFT"
@@ -137,12 +145,36 @@
               <span class="btn-lbl">STOP</span>
             </button>
 
+            <button class="btn btn-dir" id="btnNE"
+              data-cmd="FORWARD_RIGHT"
+              ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+              onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+              <span class="btn-arrow">↗</span>
+              <span class="btn-lbl">N-E</span>
+            </button>
+
+            <button class="btn btn-dir" id="btnSW"
+              data-cmd="BACKWARD_LEFT"
+              ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+              onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+              <span class="btn-arrow">↙</span>
+              <span class="btn-lbl">S-W</span>
+            </button>
+
             <button class="btn btn-dir" id="btnRight"
               data-cmd="RIGHT"
               ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
               onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
               <span class="btn-arrow">▶</span>
               <span class="btn-lbl">RIGHT</span>
+            </button>
+
+            <button class="btn btn-dir" id="btnSE"
+              data-cmd="BACKWARD_RIGHT"
+              ontouchstart="pressBtn(this)" ontouchend="releaseBtn(this)"
+              onmousedown="pressBtn(this)" onmouseup="releaseBtn(this)" onmouseleave="releaseBtn(this)">
+              <span class="btn-arrow">↘</span>
+              <span class="btn-lbl">S-E</span>
             </button>
 
             <!-- Down -->
@@ -178,7 +210,7 @@
   </div>
 
   <script>
-    const WS_URL = 'ws://10.129.54.23:8765';  // ← Python server IP:port
+    const WS_URL = 'ws://10.80.123.23:8765';  // ← Python server IP:port
     let ws = null;
 
     // ── Tunable debug thresholds (adjust these while tuning PID) ──
@@ -479,18 +511,21 @@
         let d;
         try {
           d = JSON.parse(e.data);
+          if (d.type) console.log("Message type received:", d.type);
         } catch (err) {
           addLog('RX: ' + e.data, 'info');
           return;
         }
 
-        if (d.type === 'SCAN' && Array.isArray(d.measure)) {
+        if (d.type === 'LOG') {
+          console.log("%c[ROBOT]", "color: #00e676; font-weight: bold;", d.message);
+        } else if (d.type === 'SCAN' && Array.isArray(d.measure)) {
           handleScanSweep(d);
-        } else if (d.type === 'TRAJECTORY_UPDATE' && Array.isArray(d.keyframes)) {
+        } else if (d.type === "TRAJECTORY_UPDATE") {
           handleTrajectoryUpdate(d);
-        } else {
+        }  else {
           handleTelemetry(d);
-        }
+        };
       };
     }
 
@@ -583,6 +618,14 @@
       poseGraphNodes = d.keyframes.map(k => ({
         id: k.id, x: parseFloat(k.x), y: parseFloat(k.y), theta: parseFloat(k.theta)
       }));
+      // Extract corrected scan points from all keyframes
+      sweepHistory = sweepHistory.filter(s => !s.corrected); // remove old corrected sweeps
+      for (const k of d.keyframes) {
+          if (k.scan_points && k.scan_points.length > 0) {
+              const points = k.scan_points.map(pt => ({ x: pt[0], y: pt[1] }));
+              sweepHistory.push({ points, gen: ++sweepGenCounter, corrected: true });
+          }
+      }
       loopEdge = (d.loop_from !== undefined && d.loop_to !== undefined)
         ? { from: d.loop_from, to: d.loop_to }
         : null;
@@ -676,6 +719,38 @@
       log.scrollTop = log.scrollHeight;
       if (log.children.length > 30) log.removeChild(log.firstChild);
     }
+
+    // ── Keyboard control (desktop) — standard ROS teleop_twist_keyboard layout ──
+    const KEY_TO_BTN_ID = {
+      'i': 'btnUp',
+      ',': 'btnDown', '<': 'btnDown',
+      'j': 'btnLeft',
+      'l': 'btnRight',
+      'k': 'btnStop',
+      'u': 'btnNW',
+      'o': 'btnNE',
+      'm': 'btnSW',
+      '.': 'btnSE', '>': 'btnSE'
+    };
+    const activeKeys = new Set();
+
+    window.addEventListener('keydown', (e) => {
+      const key = e.key.toLowerCase();
+      const btnId = KEY_TO_BTN_ID[key];
+      if (!btnId || activeKeys.has(key)) return;   // ignore held-key repeat events
+      activeKeys.add(key);
+      const el = document.getElementById(btnId);
+      if (el) pressBtn(el);
+    });
+
+    window.addEventListener('keyup', (e) => {
+      const key = e.key.toLowerCase();
+      const btnId = KEY_TO_BTN_ID[key];
+      if (!btnId) return;
+      activeKeys.delete(key);
+      const el = document.getElementById(btnId);
+      if (el) releaseBtn(el);
+    });
 
     // Initial setup
     mapToggleBtn.style.display = isDesktopLayout() ? 'none' : '';

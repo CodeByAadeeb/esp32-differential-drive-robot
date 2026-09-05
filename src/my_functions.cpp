@@ -27,7 +27,7 @@ unsigned long last_loop_time = 0;
 const unsigned long LOOP_INTERVAL_MS = 100;
 
 // --- PID ---
-const float Kp          = 1.3;   // tune this: increase if still drifting, decrease if wobbling was 2.2
+const float Kp          = 0.7;   // tune this: increase if still drifting, decrease if wobbling was 2.2
 const int   BASE_SPEED  = 200;  // was 180
 int16_t pid_ticks_left  = 0;   // tick snapshot when movement started
 int16_t pid_ticks_right = 0;
@@ -88,7 +88,7 @@ void setMotors(int left_speed, int right_speed) {
     return;
   }
 
-  if (left_speed > 0 && right_speed > 0) {
+  if (left_speed > 0 && right_speed > 0 && left_speed == right_speed) {
     // FORWARD — enable PID, snapshot current ticks
     pid_startup_count = 0;
     integral = 0.0;
@@ -103,7 +103,7 @@ void setMotors(int left_speed, int right_speed) {
     digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH);
     digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH);
 
-  } else if (left_speed < 0 && right_speed < 0) {
+  } else if (left_speed < 0 && right_speed < 0 && left_speed == right_speed) {
     // BACKWARD — enable PID
     pid_startup_count = 0;
     integral = 0.0;
@@ -133,7 +133,36 @@ void setMotors(int left_speed, int right_speed) {
     ledcWrite(rightChannel, BASE_SPEED);
     digitalWrite(IN1, HIGH);  digitalWrite(IN2, LOW);
     digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+  } else if (left_speed < right_speed && left_speed > 0 && right_speed > 0) {
+    // FORWARD LEFT — no PID
+    pid_active = false;
+    ledcWrite(leftChannel,  BASE_SPEED);
+    ledcWrite(rightChannel, BASE_SPEED*0.6);
+    digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH);
+  } else if (left_speed > right_speed && left_speed > 0 && right_speed > 0) {
+    // FORWARD RIGHT — no PID
+    pid_active = false;
+    ledcWrite(leftChannel,  BASE_SPEED*0.6);
+    ledcWrite(rightChannel, BASE_SPEED);
+    digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH);
+  } else if (left_speed > right_speed && left_speed < 0 && right_speed < 0) {
+    // BACKWARD LEFT — no PID
+    pid_active = false;
+    ledcWrite(leftChannel,  BASE_SPEED);
+    ledcWrite(rightChannel, BASE_SPEED*0.6);
+    digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+    digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  } else if (left_speed < right_speed && left_speed < 0 && right_speed < 0) {
+    // BACKWARD RIGHT — no PID
+    pid_active = false;
+    ledcWrite(leftChannel,  BASE_SPEED*0.6);
+    ledcWrite(rightChannel, BASE_SPEED);
+    digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+    digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
   }
+
 }
 
 
@@ -157,6 +186,10 @@ void onPythonEvent(WStype_t type, uint8_t *payload, size_t length) {
             else if (strcmp((char *)payload, "LEFT")     == 0) setMotors(-255,  255);
             else if (strcmp((char *)payload, "RIGHT")    == 0) setMotors( 255, -255);
             else if (strcmp((char *)payload, "STOP")     == 0) setMotors(0, 0);
+            else if (strcmp((char *)payload, "FORWARD_LEFT")  == 0) setMotors(120,  255);
+            else if (strcmp((char *)payload, "FORWARD_RIGHT") == 0) setMotors( 255, 120);
+            else if (strcmp((char *)payload, "BACKWARD_LEFT")  == 0) setMotors(-120,  -255);
+            else if (strcmp((char *)payload, "BACKWARD_RIGHT") == 0) setMotors( -255, -120);
             else if (strcmp((char *)payload, "RESET") == 0) {
                 robot_x = 0.0;
                 robot_y = 0.0;

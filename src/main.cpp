@@ -30,7 +30,7 @@ static void sendScanSample(int servo_angle, float x, float y, float theta, uint1
   // Start formatting the beginning of your JSON string
   int len = snprintf(buf, sizeof(buf),
       "{\"type\":\"SCAN\",\"current_servo_angle\":%d,\"x\":%.2f,\"y\":%.2f,\"theta\":%.2f,\"measure\":[",
-      servo_angle, x, y, theta);
+      servo_angle, x, y, theta); // what does sprintf return? --- It returns the number of characters written to the buffer, excluding the null terminator. This is useful for keeping track of how much of the buffer has been filled so far.
 
   // 2. Loop through the array to add each element into the JSON array string
   for (int i = 0; i < array_size; i++) {
@@ -91,7 +91,7 @@ void setup() {
   server.onNotFound(onPageNotFound);
   server.begin();
 
-  webSocketClient.begin("10.129.54.23", 8765, "/"); // Python server IP  doubt on this line
+  webSocketClient.begin("10.80.123.23", 8765, "/"); // Python server IP  doubt on this line
   webSocketClient.onEvent(onPythonEvent);
   webSocketClient.enableHeartbeat(15000, 3000, 2);
 
@@ -245,7 +245,7 @@ void loop() {
     }
 
     // scan coordinates (still projected from ESP-local pose — see note above)
-    float sensor_world_angle = current_angle - (PI / 2.0);
+    float sensor_world_angle = current_angle - (PI / 2.0) + current_servo_angle * (PI / 180.0); // --- doubt --- why is it current_angle - (PI / 2.0)? 
     float x_scan = (distance_mm * cos(sensor_world_angle)) + robot_x + x_offset;
     float y_scan = (distance_mm * sin(sensor_world_angle)) + robot_y + y_offset;
 
