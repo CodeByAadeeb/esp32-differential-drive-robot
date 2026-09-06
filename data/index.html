@@ -41,6 +41,7 @@
           <button class="layer-btn active" id="btnRaw" onclick="toggleLayer('raw')">RAW</button>
           <button class="layer-btn active" id="btnSLAM" onclick="toggleLayer('slam')">SLAM</button>
           <button class="layer-btn active" id="btnBoth" onclick="toggleLayer('both')">BOTH</button>
+          <button class="layer-btn" onclick="resetView()">RESET VIEW</button>
         </div>
       </div>
 
@@ -236,6 +237,11 @@
     let sweepHistory   = [];   // [{points:[{x,y}...], gen:number}] — one entry per completed SCAN sweep (green, fades with age)
     let sweepGenCounter = 0;
     let mapLayerMode = 'both';  // 'raw', 'slam', or 'both'
+    let mapScale_user = 1.0;   // user zoom level
+    let mapOffsetX = 0;        // pan offset X in pixels
+    let mapOffsetY = 0;        // pan offset Y in pixels
+    let lastPinchDist = null;
+    let lastPanX = null, lastPanY = null;
 
     // Pose-graph (visual SLAM) state — populated by TRAJECTORY_UPDATE messages
     let poseGraphNodes  = [];  // [{id, x, y, theta}, ...] most recent optimized trajectory
@@ -280,6 +286,86 @@
       mapCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
       drawMap();
     }
+
+    // Pinch to zoom
+    mapCanvas.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 2) {
+            lastPinchDist = Math.hypot(
+                e.touches[0].clientX - e.touches[1].clientX,
+                e.touches[0].clientY - e.touches[1].clientY
+            );
+        } else if (e.touches.length === 1) {
+            lastPanX = e.touches[0].clientX;
+            lastPanY = e.touches[0].clientY;
+        }
+        e.preventDefault();
+    }, { passive: false });  // ← change from passive: true to passive: false
+
+    mapCanvas.addEventListener('touchmove', (e) => {
+        if (e.touches.length === 2) {
+            const dist = Math.hypot(
+                e.touches[0].clientX - e.touches[1].clientX,
+                e.touches[0].clientY - e.touches[1].clientY
+            );
+            if (lastPinchDist) {
+                mapScale_user *= dist / lastPinchDist;
+                mapScale_user = Math.max(0.5, Math.min(mapScale_user, 10));
+            }
+            lastPinchDist = dist;
+            drawMap();
+        } else if (e.touches.length === 1 && lastPanX !== null) {
+            mapOffsetX += e.touches[0].clientX - lastPanX;
+            mapOffsetY += e.touches[0].clientY - lastPanY;
+            lastPanX = e.touches[0].clientX;
+            lastPanY = e.touches[0].clientY;
+            drawMap();
+        }
+        e.preventDefault();
+    }, { passive: false });
+
+    mapCanvas.addEventListener('touchend', () => {
+        lastPinchDist = null;
+        lastPanX = null;
+        lastPanY = null;
+    });
+
+    // Mouse wheel zoom for desktop
+    mapCanvas.addEventListener('wheel', (e) => {
+        mapScale_user *= e.deltaY < 0 ? 1.1 : 0.9;
+        mapScale_user = Math.max(0.5, Math.min(mapScale_user, 10));
+        drawMap();
+        e.preventDefault();
+    }, { passive: false });
+
+    // Mouse pan (desktop)
+    let isMousePanning = false;
+    let lastMouseX = null, lastMouseY = null;
+
+    mapCanvas.addEventListener('mousedown', (e) => {
+        isMousePanning = true;
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+        mapCanvas.style.cursor = 'grabbing';
+    });
+
+    mapCanvas.addEventListener('mousemove', (e) => {
+        if (!isMousePanning) return;
+        mapOffsetX += e.clientX - lastMouseX;
+        mapOffsetY += e.clientY - lastMouseY;
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+        drawMap();
+    });
+
+    mapCanvas.addEventListener('mouseup', () => {
+        isMousePanning = false;
+        mapCanvas.style.cursor = 'default';
+    });
+
+    mapCanvas.addEventListener('mouseleave', () => {
+        isMousePanning = false;
+        mapCanvas.style.cursor = 'default';
+    });
 
     function shouldDraw() {
       return mapOpen || isDesktopLayout();
@@ -337,10 +423,13 @@
       const showSLAM = mapLayerMode === 'slam' || mapLayerMode === 'both';
 
       const margin = 22;
-      const scale = (Math.min(w, h) / 2 - margin) / maxExtent;
+      const scale = ((Math.min(w, h) / 2 - margin) / maxExtent) * mapScale_user;
       mapScaleLbl.textContent = 'RANGE ' + Math.round(maxExtent * 2) + 'mm';
 
-      const toScreen = (rx, ry) => ({ sx: cx - ry * scale, sy: cy - rx * scale });
+      const toScreen = (rx, ry) => ({
+          sx: cx - ry * scale + mapOffsetX,
+          sy: cy - rx * scale + mapOffsetY
+      });
 
       // Crosshair
       mapCtx.strokeStyle = 'rgba(58,90,58,0.4)';
@@ -363,7 +452,7 @@
           mapCtx.strokeStyle = '#3dff70';
           mapCtx.lineWidth = 1.5;
           mapCtx.shadowColor = 'rgba(61,255,112,0.5)';
-          mapCtx.shadowBlur = 4;
+          mapCtx.shadowBlur = 0;
           mapCtx.beginPath();
           const first = toScreen(pathHistory[0].x, pathHistory[0].y);
           mapCtx.moveTo(first.sx, first.sy);
@@ -431,9 +520,9 @@
         if (poseGraphNodes.length > 0) {
           const flashing = performance.now() < loopFlashUntil;
           mapCtx.strokeStyle = flashing ? '#ffffff' : '#ff33e6';
-          mapCtx.lineWidth = flashing ? 3 : 1.5;
+          mapCtx.lineWidth = flashing ? 3 : 1.5; 
           mapCtx.shadowColor = 'rgba(255,51,230,0.7)';
-          mapCtx.shadowBlur = flashing ? 10 : 3;
+          mapCtx.shadowBlur = flashing ? 10 : 0;
           mapCtx.beginPath();
           const first = toScreen(poseGraphNodes[0].x, poseGraphNodes[0].y);
           mapCtx.moveTo(first.sx, first.sy);
@@ -447,7 +536,7 @@
           mapCtx.fillStyle = '#ff33e6';
           for (const n of poseGraphNodes) {
             const s = toScreen(n.x, n.y);
-            mapCtx.fillRect(s.sx - 2.5, s.sy - 2.5, 5, 5);
+            mapCtx.fillRect(s.sx - 1, s.sy - 1, 2, 2);  // was 2.5/5, reduce to 1/2 mapCtx.fillRect(s.sx - 2.5, s.sy - 2.5, 5, 5);
           }
 
           // Loop closure edge (yellow dashed)
@@ -746,6 +835,13 @@
       lastTheta = 0;
       if (shouldDraw()) drawMap();
       addLog('Origin reset', 'ok');
+    }
+
+    function resetView() {
+        mapScale_user = 1.0;
+        mapOffsetX = 0;
+        mapOffsetY = 0;
+        drawMap();
     }
 
     function setConn(on) {

@@ -895,6 +895,7 @@ class RobotBackend:
             self.latest_raw_sweep: Optional[list] = None
             self.has_new_sweep: bool = False 
             self._last_turn_theta_deg = None
+            self._last_turn_pos = None
 
     def set_mode(self, mode: OdometryMode): # --- doubt --- who is calling this function in this code right now?
         self.odometry.set_mode(mode)
@@ -924,6 +925,8 @@ class RobotBackend:
                 if new_scan_candidate is not None:
                     prev_scan = self.tof_scans.scans[-1] if self.tof_scans.scans else None
                     self.tof_scans.add_graph_node(new_scan_candidate, prev_scan)
+                    self._last_turn_theta_deg = None  # ← reset after real scan
+                    self._last_turn_pos = None
 
                     if new_scan_candidate.id > 0:
                         candidates = self.tof_scans.odometry_proximate_candidates(
@@ -936,18 +939,14 @@ class RobotBackend:
                             for stored_scan in self.tof_scans.scans:
                                 if result.exists(X(stored_scan.id)):
                                     p = result.atPose2(X(stored_scan.id))
-                                    stored_scan.corrected_pose = {"x": p.x(), "y": p.y(), "theta": p.theta()}
-                                    for stored_scan in self.tof_scans.scans:
-                                        if result.exists(X(stored_scan.id)):
-                                            p = result.atPose2(X(stored_scan.id))
-                                            stored_scan.corrected_pose = {
-                                                "x": p.x(), "y": p.y(), "theta": p.theta()
-                                            }
-                                            # Reproject scan points using corrected pose
-                                            if stored_scan.raw_sweep:
-                                                stored_scan.corrected_scan_points = scan_to_world_points(
-                                                    stored_scan.corrected_pose, stored_scan.raw_sweep
-                                                )
+                                    stored_scan.corrected_pose = {
+                                        "x": p.x(), "y": p.y(), "theta": p.theta()
+                                    }
+                                    # Reproject scan points using corrected pose
+                                    if stored_scan.raw_sweep:
+                                        stored_scan.corrected_scan_points = scan_to_world_points(
+                                            stored_scan.corrected_pose, stored_scan.raw_sweep
+                                        )
                             p_from = result.atPose2(X(new_scan_candidate.id))
                             p_to   = result.atPose2(X(loop["matched_kf_id"]))
                             dist = math.hypot(p_from.x() - p_to.x(), p_from.y() - p_to.y())
@@ -955,29 +954,40 @@ class RobotBackend:
                             print(f"✅ ToF trajectory corrected via graph optimization (source={loop['source']}).")
                             await self._broadcast_trajectory(new_scan_candidate.id, loop["matched_kf_id"], source="tof")
 
-                # Turn node — create odometry-only graph node when robot rotates significantly
-                # without a new scan (captures turns that happen between scan stops)
+            # Turn node — create odometry-only graph node when robot rotates significantly
+            # without a new scan (captures turns that happen between scan stops)
             new_scan_this_tick = new_scan_candidate is not None
             if not new_scan_this_tick and self.tof_scans.scans:
-                # Find last scan with actual sweep data (not a turn node)
                 last_real_scan = next(
                     (s for s in reversed(self.tof_scans.scans) if s.raw_sweep),
                     None
                 )
-                if last_real_scan is None:
-                    pass
-                else:
-                    last_theta = last_real_scan.pose_at_capture.get("theta", 0)
-                    current_theta = pose.get("theta", 0)
-                    angle_diff_deg = abs(math.degrees(current_theta) - math.degrees(last_theta))
+                if last_real_scan is not None:
+                    # Use last turn theta if available, otherwise use last real scan theta
+                    if self._last_turn_theta_deg is not None:
+                        last_theta_deg = self._last_turn_theta_deg
+                    else:
+                        last_theta_deg = math.degrees(last_real_scan.pose_at_capture.get("theta", 0))
+                    
+                    current_theta_deg = math.degrees(pose.get("theta", 0))
+                    angle_diff_deg = abs(current_theta_deg - last_theta_deg)
                     if angle_diff_deg > 180:
                         angle_diff_deg = 360 - angle_diff_deg
+
                     if angle_diff_deg > KEYFRAME_MIN_ANGLE_DEG:
-                        turn_id = len(self.tof_scans.scans)
-                        turn_node = ScanFrame(turn_id, [], pose)
-                        self.tof_scans.add_graph_node(turn_node, self.tof_scans.scans[-1])
-                        self._last_turn_theta_deg = current_theta 
-                        print(f"[TURN NODE] #{turn_id} added at ({pose['x']:.1f}, {pose['y']:.1f}) angle_diff={angle_diff_deg:.1f}°")
+                        curr_pos = (pose["x"], pose["y"])
+                        too_close = (
+                            self._last_turn_pos is not None and
+                            math.hypot(curr_pos[0] - self._last_turn_pos[0],
+                                    curr_pos[1] - self._last_turn_pos[1]) < 50.0
+                        )
+                        if not too_close:
+                            turn_id = len(self.tof_scans.scans)
+                            turn_node = ScanFrame(turn_id, [], pose)
+                            self.tof_scans.add_graph_node(turn_node, self.tof_scans.scans[-1])
+                            self._last_turn_theta_deg = current_theta_deg
+                            self._last_turn_pos = curr_pos
+                            print(f"[TURN NODE] #{turn_id} added at ({pose['x']:.1f}, {pose['y']:.1f}) angle_diff={angle_diff_deg:.1f}°")
 
 
             # 3. Web UI publisher — reads the updated pose dict
