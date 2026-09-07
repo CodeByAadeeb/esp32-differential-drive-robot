@@ -28,7 +28,7 @@
     #define leftChannel  2
     #define rightChannel 3
     #define SERVO_PIN 13
-    #define ServoArraySize 19
+    #define ServoArraySize 37 // 19 for 10 steps, 181 for 1 step, 37 fo4 5 step
 
     // --- Robot Constants ---
     extern const float WHEEL_DIAMETER_MM;

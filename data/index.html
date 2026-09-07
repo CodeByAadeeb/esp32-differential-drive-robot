@@ -42,6 +42,7 @@
           <button class="layer-btn active" id="btnSLAM" onclick="toggleLayer('slam')">SLAM</button>
           <button class="layer-btn active" id="btnBoth" onclick="toggleLayer('both')">BOTH</button>
           <button class="layer-btn" onclick="resetView()">RESET VIEW</button>
+          <button class="reset-btn" onclick="ws.send('SAVE_MAP')">💾 SAVE MAP</button>
         </div>
       </div>
 
@@ -255,8 +256,13 @@
     const MIN_SENSOR_RANGE = 20;    // ignore readings below 20mm (too close, likely invalid)
     let lastTheta   = 0;    // degrees
     let mapOpen     = false;
-    const MAX_POINTS = 5000;
+    const MAX_POINTS = 15000;
     const DESKTOP_BREAKPOINT = 700;
+    let correctedRobotPos = null;  // set after loop closure, null if no correction yet
+
+    let occupiedCells = [];   // world-frame mm positions of occupied cells
+    let freeCells = [];       // world-frame mm positions of free cells
+    let cellSizeMm = 50;
 
     function isDesktopLayout() {
       return window.innerWidth >= DESKTOP_BREAKPOINT;
@@ -451,18 +457,46 @@
         if (pathHistory.length > 1) {
           mapCtx.strokeStyle = '#3dff70';
           mapCtx.lineWidth = 1.5;
-          mapCtx.shadowColor = 'rgba(61,255,112,0.5)';
           mapCtx.shadowBlur = 0;
           mapCtx.beginPath();
-          const first = toScreen(pathHistory[0].x, pathHistory[0].y);
-          mapCtx.moveTo(first.sx, first.sy);
-          for (let i = 1; i < pathHistory.length; i++) {
-            const p = toScreen(pathHistory[i].x, pathHistory[i].y);
-            mapCtx.lineTo(p.sx, p.sy);
+          let penDown = false;
+          for (let i = 0; i < pathHistory.length; i++) {
+            const p = pathHistory[i];
+            if (p.isBreak) {
+              penDown = false;
+              continue;
+            }
+            const s = toScreen(p.x, p.y);
+            if (!penDown) {
+              mapCtx.moveTo(s.sx, s.sy);
+              penDown = true;
+            } else {
+              mapCtx.lineTo(s.sx, s.sy);
+            }
           }
           mapCtx.stroke();
-          mapCtx.shadowBlur = 0;
         }
+        
+        // Draw correction jumps as dashed lines
+        mapCtx.save();
+        mapCtx.strokeStyle = '#ffee00';
+        mapCtx.lineWidth = 0.8;
+        mapCtx.setLineDash([3, 4]);
+        for (let i = 1; i < pathHistory.length - 1; i++) {
+            if (pathHistory[i].isBreak) {
+                const before = pathHistory[i - 1];
+                const after  = pathHistory[i + 1];
+                if (!before || !after || before.isBreak || after.isBreak) continue;
+                const a = toScreen(before.x, before.y);
+                const b = toScreen(after.x,  after.y);
+                mapCtx.beginPath();
+                mapCtx.moveTo(a.sx, a.sy);
+                mapCtx.lineTo(b.sx, b.sy);
+                mapCtx.stroke();
+            }
+        }
+        mapCtx.setLineDash([]);
+        mapCtx.restore();
 
         // Raw ToF sweeps (green dots, fading)
         if (sweepHistory.length > 0) {
@@ -481,6 +515,25 @@
             }
           }
           mapCtx.globalAlpha = 1;
+        }
+
+        // Occupancy grid cells
+        if (occupiedCells.length > 0) {
+            const cellPx = cellSizeMm * scale;  // cell size in pixels
+
+            // Free cells — very dim green
+            mapCtx.fillStyle = 'rgba(61,255,112,0.08)';
+            for (const [wx, wy] of freeCells) {
+                const s = toScreen(wx, wy);
+                mapCtx.fillRect(s.sx - cellPx/2, s.sy - cellPx/2, cellPx, cellPx);
+            }
+
+            // Occupied cells — solid red
+            mapCtx.fillStyle = 'rgba(255,59,59,0.7)';
+            for (const [wx, wy] of occupiedCells) {
+                const s = toScreen(wx, wy);
+                mapCtx.fillRect(s.sx - cellPx/2, s.sy - cellPx/2, cellPx, cellPx);
+            }
         }
 
         // Live scan trail (blue)
@@ -569,37 +622,40 @@
         }
       }
 
-      // Current robot position arrow (always shown)
-      if (pathHistory.length > 0) {
-        const last = pathHistory[pathHistory.length - 1];
-        const pos  = toScreen(last.x, last.y);
-        const rad  = lastTheta * Math.PI / 180;
-        const arrowLen = 14;
-        const tipX = pos.sx - Math.sin(rad) * arrowLen;
-        const tipY = pos.sy - Math.cos(rad) * arrowLen;
+      // Current robot position arrow
+      const arrowSource = correctedRobotPos || 
+          [...pathHistory].reverse().find(p => !p.isBreak) || null;
 
-        mapCtx.strokeStyle = '#e8a020';
-        mapCtx.lineWidth = 2;
-        mapCtx.beginPath();
-        mapCtx.moveTo(pos.sx, pos.sy);
-        mapCtx.lineTo(tipX, tipY);
-        mapCtx.stroke();
+      if (arrowSource) {
+          const pos = toScreen(arrowSource.x, arrowSource.y);
+          const rad = lastTheta * Math.PI / 180;
+          const arrowLen = 14;
+          const tipX = pos.sx - Math.sin(rad) * arrowLen;
+          const tipY = pos.sy - Math.cos(rad) * arrowLen;
 
-        const headAngle = 0.5, headLen = 5;
-        mapCtx.beginPath();
-        mapCtx.moveTo(tipX, tipY);
-        mapCtx.lineTo(tipX - Math.sin(rad + Math.PI - headAngle) * headLen,
-                      tipY - Math.cos(rad + Math.PI - headAngle) * headLen);
-        mapCtx.moveTo(tipX, tipY);
-        mapCtx.lineTo(tipX - Math.sin(rad + Math.PI + headAngle) * headLen,
-                      tipY - Math.cos(rad + Math.PI + headAngle) * headLen);
-        mapCtx.stroke();
+          mapCtx.strokeStyle = '#e8a020';
+          mapCtx.lineWidth = 2;
+          mapCtx.beginPath();
+          mapCtx.moveTo(pos.sx, pos.sy);
+          mapCtx.lineTo(tipX, tipY);
+          mapCtx.stroke();
 
-        mapCtx.fillStyle = '#3dff70';
-        mapCtx.beginPath();
-        mapCtx.arc(pos.sx, pos.sy, 3, 0, Math.PI * 2);
-        mapCtx.fill();
+          const headAngle = 0.5, headLen = 5;
+          mapCtx.beginPath();
+          mapCtx.moveTo(tipX, tipY);
+          mapCtx.lineTo(tipX - Math.sin(rad + Math.PI - headAngle) * headLen,
+                        tipY - Math.cos(rad + Math.PI - headAngle) * headLen);
+          mapCtx.moveTo(tipX, tipY);
+          mapCtx.lineTo(tipX - Math.sin(rad + Math.PI + headAngle) * headLen,
+                        tipY - Math.cos(rad + Math.PI + headAngle) * headLen);
+          mapCtx.stroke();
+
+          mapCtx.fillStyle = '#3dff70';
+          mapCtx.beginPath();
+          mapCtx.arc(pos.sx, pos.sy, 3, 0, Math.PI * 2);
+          mapCtx.fill();
       }
+
     }
 
     function startFlashLoop() {
@@ -644,7 +700,9 @@
           handleScanSweep(d);
         } else if (d.type === "TRAJECTORY_UPDATE") {
           handleTrajectoryUpdate(d);
-        }  else {
+        } else if (d.type === 'OCCUPANCY_GRID') {
+          handleOccupancyGrid(d);
+        } else {
           handleTelemetry(d);
         };
       };
@@ -673,7 +731,13 @@
 
       // Path tracking (raw odometry)
       if (d.x !== undefined && d.y !== undefined) {
-        pathHistory.push({ x: parseFloat(d.x), y: parseFloat(d.y) });
+        const corr = window._poseCorrection || { dx: 0, dy: 0 };
+        // right before pathHistory.push
+        //console.log('pushing corrected point:', parseFloat(d.x) + corr.dx, parseFloat(d.y) + corr.dy, 'raw:', d.x, d.y, 'corr:', corr);
+        pathHistory.push({ 
+            x: parseFloat(d.x) + corr.dx, 
+            y: parseFloat(d.y) + corr.dy 
+        });
         if (pathHistory.length > MAX_POINTS) pathHistory.shift();
         if (d.theta !== undefined) lastTheta = parseFloat(d.theta);
       }
@@ -691,6 +755,30 @@
       logTelemetry(d);
 
       if (shouldDraw()) drawMap();
+    }
+
+    function pruneStaleGhostPoints(sensorX, sensorY, newHits) {
+      const PERP_TOLERANCE_MM = 40; // how close to the beam line counts as "on this ray"
+      const MARGIN_MM = 30;         // don't prune points essentially AT the new hit itself
+
+      for (const sweep of sweepHistory) {
+        sweep.points = sweep.points.filter(p => {
+          const px = p.x - sensorX, py = p.y - sensorY;
+
+          for (const hit of newHits) {
+            const rayDx = Math.cos(hit.worldAngle), rayDy = Math.sin(hit.worldAngle);
+            const along = px * rayDx + py * rayDy;            // distance along this beam
+            const perp  = Math.abs(px * rayDy - py * rayDx);   // perpendicular distance from the beam line
+
+            // This old point lies on the current beam's path, closer than the new
+            // confirmed hit — the beam demonstrably passed through here just now.
+            if (perp < PERP_TOLERANCE_MM && along > 0 && along < hit.dist - MARGIN_MM) {
+              return false; // drop it
+            }
+          }
+          return true; // keep it
+        });
+      }
     }
 
     // Full ToF sweep batch — one message per completed sweep of the servo
@@ -711,10 +799,13 @@
           const worldAngle = rThetaRad + servoAngle;
           points.push({
             x: rx + dist * Math.cos(worldAngle),
-            y: ry + dist * Math.sin(worldAngle)
+            y: ry + dist * Math.sin(worldAngle),
+            dist: dist, worldAngle: worldAngle
           });
         }
       });
+
+      pruneStaleGhostPoints(rx, ry, points); 
 
       sweepGenCounter++;
       sweepHistory.push({ points, gen: sweepGenCounter });
@@ -739,6 +830,42 @@
       poseGraphNodes = d.keyframes.map(k => ({
         id: k.id, x: parseFloat(k.x), y: parseFloat(k.y), theta: parseFloat(k.theta)
       }));
+
+      // Snap robot position to corrected pose after optimization
+      if (poseGraphNodes.length > 0) {
+          const lastCorrected = poseGraphNodes[poseGraphNodes.length - 1];
+          correctedRobotPos = { x: lastCorrected.x, y: lastCorrected.y };
+
+          // Clear it after one frame so arrow follows live path again
+          setTimeout(() => { correctedRobotPos = null; }, 100);
+
+          // Find last real point BEFORE adding break — search backwards skipping isBreak
+          const lastRaw = [...pathHistory].reverse().find(p => !p.isBreak);
+          
+          console.log('lastRaw found:', lastRaw);  // ← add this
+          console.log('lastCorrected:', lastCorrected);  // ← add this
+
+          if (lastRaw) {
+              window._poseCorrection = {
+                  dx: lastCorrected.x - lastRaw.x,
+                  dy: lastCorrected.y - lastRaw.y
+              };
+              const mag = Math.hypot(window._poseCorrection.dx, window._poseCorrection.dy);
+              console.log(`CORRECTION MAGNITUDE: ${mag.toFixed(1)}mm`);
+          } else {
+              console.log('NO lastRaw found — pathHistory:', pathHistory.length, 'items');
+          }
+
+          // ONLY THEN push break and corrected point
+          pathHistory.push({ x: null, y: null, isBreak: true });
+          pathHistory.push({ x: lastCorrected.x, y: lastCorrected.y });
+      }
+
+      if (window._poseCorrection) {
+          const mag = Math.hypot(window._poseCorrection.dx, window._poseCorrection.dy);
+          console.log(`CORRECTION MAGNITUDE: ${mag.toFixed(1)}mm`);
+      }
+
       // Extract corrected scan points from all keyframes
       sweepHistory = sweepHistory.filter(s => !s.corrected); // remove old corrected sweeps
       for (const k of d.keyframes) {
@@ -771,6 +898,13 @@
 
       startFlashLoop();
       if (shouldDraw()) drawMap();
+    }
+
+    function handleOccupancyGrid(d) {
+        cellSizeMm   = d.cell_mm;
+        occupiedCells = d.occupied;  // array of [x, y] pairs
+        freeCells     = d.free;
+        if (shouldDraw()) drawMap();
     }
 
     // Structured console output for live PID tuning — one row per telemetry tick
@@ -833,6 +967,10 @@
       poseGraphNodes = [];
       loopEdge = null;
       lastTheta = 0;
+      correctedRobotPos = null;
+      window._poseCorrection = null;
+      occupiedCells = [];
+      freeCells = [];
       if (shouldDraw()) drawMap();
       addLog('Origin reset', 'ok');
     }

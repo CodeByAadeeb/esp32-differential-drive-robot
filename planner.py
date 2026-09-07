@@ -19,6 +19,7 @@ import torch
 from PIL import Image
 from transformers import pipeline
 import sys
+import os
 
 # ── Constants ────────────────────────────────────────────────────────────
 PYTHON_WS_PORT = 8765
@@ -58,7 +59,7 @@ MIN_INLIER_COUNT = 8
 MIN_INLIER_RATIO = 0.30 # was 0.5
 
 # Odometry-proximity + ToF scan-matching loop closure (fallback when camera doesn't confirm).
-ODOM_PROXIMITY_RADIUS_MM = 800.0 #800.0
+ODOM_PROXIMITY_RADIUS_MM = 500.0 #800.0
 SCAN_LOOP_SKIP_RECENT = 5 # 10
 SCAN_MIN_RANGE_MM = 20.0
 SCAN_MAX_RANGE_MM = 1000.0
@@ -137,6 +138,101 @@ def scan_to_world_points(pose_rad: dict, measures: list,
             y = pose_rad["y"] + dist * np.sin(world_angle)
             points.append((x, y))
     return points  
+
+class OccupancyGrid:
+    """Probabilistic 2D occupancy grid using log-odds updates."""
+
+    LOG_ODDS_OCC  =  0.85   # log-odds added when ray hits a cell
+    LOG_ODDS_FREE = -0.40   # log-odds added when ray passes through a cell
+    LOG_ODDS_MIN  = -5.0    # clamp floor
+    LOG_ODDS_MAX  =  5.0    # clamp ceiling
+    PROB_OCC_THRESH = 0.65  # display as occupied above this
+    PROB_FREE_THRESH = 0.35 # display as free below this
+
+    def __init__(self, cell_size_mm: float = 50.0, grid_size_mm: float = 8000.0):
+        self.cell_size   = cell_size_mm
+        self.n_cells     = int(grid_size_mm / cell_size_mm)
+        self.origin      = self.n_cells // 2   # world (0,0) maps to center cell
+        # Log-odds grid — 0.0 = unknown (prob 0.5)
+        self.log_odds    = np.zeros((self.n_cells, self.n_cells), dtype=np.float32)
+
+    def _world_to_cell(self, x_mm: float, y_mm: float):
+        cx = int(self.origin + round(x_mm / self.cell_size))
+        cy = int(self.origin - round(y_mm / self.cell_size))  # Y flipped for screen
+        return cx, cy
+
+    def _in_bounds(self, cx: int, cy: int) -> bool:
+        return 0 <= cx < self.n_cells and 0 <= cy < self.n_cells
+
+    def _bresenham(self, x0, y0, x1, y1):
+        """Yield all (cx, cy) cells along a line from (x0,y0) to (x1,y1)."""
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
+        err = dx - dy
+        while True:
+            yield x0, y0
+            if x0 == x1 and y0 == y1:
+                break
+            e2 = 2 * err
+            if e2 > -dy: err -= dy; x0 += sx
+            if e2 <  dx: err += dx; y0 += sy
+
+    def update(self, robot_x: float, robot_y: float, scan_world_points: list):
+        """Update grid with one ToF sweep from robot position."""
+        rx, ry = self._world_to_cell(robot_x, robot_y)
+        for px, py in scan_world_points:
+            px_c, py_c = self._world_to_cell(px, py)
+            # Cast ray from robot to hit point
+            cells = list(self._bresenham(rx, ry, px_c, py_c))
+            # Mark all cells EXCEPT the last as free
+            for cx, cy in cells[:-1]:
+                if self._in_bounds(cx, cy):
+                    self.log_odds[cy, cx] = max(
+                        self.LOG_ODDS_MIN,
+                        self.log_odds[cy, cx] + self.LOG_ODDS_FREE
+                    )
+            # Mark hit cell as occupied
+            if cells and self._in_bounds(cells[-1][0], cells[-1][1]):
+                cx, cy = cells[-1]
+                self.log_odds[cy, cx] = min(
+                    self.LOG_ODDS_MAX,
+                    self.log_odds[cy, cx] + self.LOG_ODDS_OCC
+                )
+
+    def to_serializable(self) -> dict:
+        """Convert to compact format for browser or file storage."""
+        prob = 1.0 / (1.0 + np.exp(-self.log_odds))
+        occ_mask  = prob > self.PROB_OCC_THRESH
+        free_mask = prob < self.PROB_FREE_THRESH
+        occ_ys,  occ_xs  = np.where(occ_mask)
+        free_ys, free_xs = np.where(free_mask)
+
+        # Convert cell indices back to world mm
+        def cells_to_world(xs, ys):
+            wx = (xs.astype(float) - self.origin) * self.cell_size
+            wy = (self.origin - ys.astype(float)) * self.cell_size
+            return list(zip(wx.tolist(), wy.tolist()))
+
+        return {
+            "cell_mm": self.cell_size,
+            "occupied": cells_to_world(occ_xs, occ_ys),
+            "free":     cells_to_world(free_xs, free_ys),
+        }
+
+    def save(self, filepath: str = "occupancy_grid.npy"):
+        np.save(filepath, self.log_odds)
+        print(f"[GRID] Saved occupancy grid to {filepath}")
+
+    def load(self, filepath: str = "occupancy_grid.npy") -> bool:
+        if not os.path.exists(filepath):
+            return False
+        loaded = np.load(filepath)
+        if loaded.shape == self.log_odds.shape:
+            self.log_odds = loaded
+            print(f"[GRID] Loaded occupancy grid from {filepath}")
+            return True
+        print(f"[GRID] Shape mismatch — ignoring saved grid")
+        return False
 
 class TelemetryHub:
     """
@@ -748,28 +844,44 @@ class ScanManager:
         self.has_new_sweep = True
         print("📥 [ESP32] Fresh ToF sweep received and buffered.")
 
-    '''def add_scan_keyframe(self, current_pose: dict) -> Optional[ScanFrame]:
-        """Creates a SLAM ScanFrame node."""
-        
-        # CRITICAL FIX: If driving straight without a sweep, do NOT clone old data!
-        if self.has_new_sweep and self.latest_raw_sweep:
-            raw_sweep = self.latest_raw_sweep
-            self.has_new_sweep = False      # Reset flag
-            self.latest_raw_sweep = None    # FLUSH BUFFER immediately
-        else:
-            # Driving straight / distance trigger only — no ToF point cloud attached
-            raw_sweep = []
-
-        scan_frame = ScanFrame(
-            id=len(self.scans),
-            pose_at_capture=current_pose,
-            raw_sweep=raw_sweep
-        )
-        self.scans.append(scan_frame)
-        return scan_frame'''
-
     def reset(self):
         self.scans.clear()
+
+    MAP_FILE = "robot_map.json"
+
+    def save_map(self, filepath: str = MAP_FILE):
+        """Serialize all scan nodes with corrected poses and world-frame points to JSON."""
+        data = []
+        for s in self.scans:
+            if not s.raw_sweep:  # skip turn nodes — no scan data to save
+                continue
+            entry = {
+                "id": s.id,
+                "corrected_pose": s.corrected_pose,
+                "pose_at_capture": s.pose_at_capture,
+                "raw_sweep": s.raw_sweep,
+                "corrected_scan_points": s.corrected_scan_points if s.corrected_scan_points else []
+            }
+            data.append(entry)
+        with open(filepath, "w") as f:
+            json.dump(data, f, indent=2)
+        print(f"[MAP] Saved {len(data)} scan nodes to {filepath}")
+
+    def load_map(self, filepath: str = MAP_FILE):
+        """Load a previously saved map. Restores scan nodes but NOT the GTSAM graph."""
+        if not os.path.exists(filepath):
+            print(f"[MAP] No map file found at {filepath}")
+            return False
+        with open(filepath, "r") as f:
+            data = json.load(f)
+        self.scans.clear()
+        for entry in data:
+            sf = ScanFrame(entry["id"], entry["raw_sweep"], entry["corrected_pose"])
+            sf.corrected_pose       = entry["corrected_pose"]
+            sf.corrected_scan_points = entry.get("corrected_scan_points", [])
+            self.scans.append(sf)
+        print(f"[MAP] Loaded {len(self.scans)} scan nodes from {filepath}")
+        return True
 
     def add_graph_node(self, scan: ScanFrame, prev_scan: Optional[ScanFrame]):
         self.scans.append(scan)
@@ -833,45 +945,7 @@ class ScanManager:
                         }
                         
             return best
-'''
-    def detect_loop_closure(self, current_scan, current_pose):
-        # Exclude recent scans to avoid self-matching
-        candidate_scans = self.scans[:-4] 
-        
-        for candidate in candidate_scans:
-            # Extract pose safely regardless of attribute name
-            cand_pose = getattr(candidate, 'corrected_pose', None) or getattr(candidate, 'pose_dict', None) or getattr(candidate, 'raw_pose', None)
-            if cand_pose:
-                cand_x, cand_y, cand_theta = cand_pose['x'], cand_pose['y'], cand_pose['theta']
-            else:
-                cand_x, cand_y, cand_theta = candidate.x, candidate.y, candidate.theta
 
-            # Distance calculation
-            dist = np.hypot(current_pose['x'] - cand_x, current_pose['y'] - cand_y)
-            
-            # Heading difference calculation
-            yaw_diff = abs(np.arctan2(
-                np.sin(current_pose['theta'] - cand_theta),
-                np.cos(current_pose['theta'] - cand_theta)
-            ))
-
-            print(f"🔍 [LOOP CHECK] Scan #{current_scan.id} vs #{candidate.id} | Dist: {dist:.1f} mm | YawDiff: {np.degrees(yaw_diff):.1f}°")
-
-            if dist > 500.0:  # Distance threshold in mm
-                continue
-
-            if yaw_diff > np.radians(60.0):
-                print(f"⚠️ [LOOP REJECTED] Scan #{candidate.id} facing difference ({np.degrees(yaw_diff):.1f}°).")
-                continue
-
-            match_result = self.scan_matcher.align(current_scan, candidate)
-            print(f"📊 [ICP RESULT] Score: {getattr(match_result, 'score', 0):.3f}")
-
-            if getattr(match_result, 'success', False):
-                return {"matched_kf_id": candidate.id, "drift": match_result.transform, "source": "tof"}
-
-        return None
-'''
 # ── Wiring: hub -> odometry provider -> UI + SLAM ───────────────────────
 class RobotBackend:
     def __init__(self, mode: OdometryMode = OdometryMode.FUSED_VISUAL):
@@ -896,6 +970,17 @@ class RobotBackend:
             self.has_new_sweep: bool = False 
             self._last_turn_theta_deg = None
             self._last_turn_pos = None
+            self.occ_grid = OccupancyGrid(cell_size_mm=50.0, grid_size_mm=10000.0)
+            self.occ_grid.load()  # load previous session if exists
+            self._grid_broadcast_counter = 0  # only broadcast grid every N scans
+            # Load existing map if available
+            map_loaded = self.tof_scans.load_map()
+            if map_loaded:
+                asyncio.get_event_loop().call_later(
+                    2.0, 
+                    lambda: asyncio.ensure_future(self._broadcast_trajectory(None, None, source="loaded"))
+                )
+                print(f"[MAP] Resuming with {len(self.tof_scans.scans)} previously mapped scan nodes")
 
     def set_mode(self, mode: OdometryMode): # --- doubt --- who is calling this function in this code right now?
         self.odometry.set_mode(mode)
@@ -936,6 +1021,14 @@ class RobotBackend:
                         if loop is not None:
                             self.tof_graph.add_lpenc_fac(new_scan_candidate.id, loop["matched_kf_id"], loop["drift"])
                             result = self.tof_graph.run_optimization()
+                            print(f"Graph error before: {self.tof_graph.graph.error(self.tof_graph.values):.2f}")
+                            print(f"Graph error after:  {self.tof_graph.graph.error(result):.2f}")
+
+                            # Print first few corrected poses to check sanity
+                            for i, stored_scan in enumerate(self.tof_scans.scans[:5]):
+                                if result.exists(X(stored_scan.id)):
+                                    p = result.atPose2(X(stored_scan.id))
+                                    print(f"  Node {stored_scan.id}: ({p.x():.0f}, {p.y():.0f}) θ={math.degrees(p.theta()):.1f}°")
                             for stored_scan in self.tof_scans.scans:
                                 if result.exists(X(stored_scan.id)):
                                     p = result.atPose2(X(stored_scan.id))
@@ -1000,6 +1093,19 @@ class RobotBackend:
         payload["x"], payload["y"], payload["theta"] = pose["x"], pose["y"], np.degrees(pose["theta"])
         websockets.broadcast(self.browser_clients, json.dumps(payload))
 
+    async def _broadcast_grid(self):
+        if not self.browser_clients:
+            return
+        grid_data = self.occ_grid.to_serializable()
+        payload = json.dumps({
+            "type": "OCCUPANCY_GRID",
+            "cell_mm": grid_data["cell_mm"],
+            "occupied": grid_data["occupied"],
+            "free": grid_data["free"],
+        })
+        websockets.broadcast(self.browser_clients, payload)
+        print(f"[GRID] Broadcast {len(grid_data['occupied'])} occupied, {len(grid_data['free'])} free cells")
+
     async def _broadcast_trajectory(self, loop_from: int, loop_to: int, source: str = "camera"): 
         if not self.browser_clients:
             return
@@ -1034,6 +1140,16 @@ class RobotBackend:
             self.latest_raw_sweep = data.get("measure", [])
             self.has_new_sweep = True  # 🟢 MARK SWEEP AS FRESH
             self.latest_scan_points = scan_to_world_points(pose_rad, data.get("measure", []))
+            # Update occupancy grid with this sweep
+            if self.latest_scan_points:
+                self.occ_grid.update(
+                    pose_rad["x"], pose_rad["y"],
+                    self.latest_scan_points
+                )
+                self._grid_broadcast_counter += 1
+                # Broadcast grid to browser every 3 scans (not every scan — expensive)
+                if self._grid_broadcast_counter % 3 == 0:
+                    await self._broadcast_grid()
 
             if self.browser_clients:
                 data["x"] = pose_rad["x"]
@@ -1062,6 +1178,9 @@ class RobotBackend:
                         self.camera_graph.reset()
                         self.latest_scan_points = None
                         print("[SSOT] Pose provider + SLAM graph reset alongside ESP32.")
+                    elif message == "SAVE_MAP":
+                        self.tof_scans.save_map()
+                        websockets.broadcast(self.browser_clients, json.dumps({"type": "LOG", "message": "💾 Map saved."}))
                     if self.esp32_socket:
                         await self.esp32_socket.send(message)
                     continue
@@ -1135,17 +1254,25 @@ class RobotBackend:
                     websockets.broadcast(self.browser_clients, payload)
                 ws_logger.queue.task_done()
 
+    def save_map(self, filepath: str = "robot_map.json"):
+        self.tof_scans.save_map(filepath)
+
 
 async def main():
     backend = RobotBackend(mode=OdometryMode.PURE_ENCODER)
     async with websockets.serve(backend.handle_client, "0.0.0.0", PYTHON_WS_PORT):
         print(f"[PYTHON] SSOT server running on port {PYTHON_WS_PORT}")
-        # Camera task created AFTER server is listening — both run concurrently
-        await asyncio.gather(
-            #backend.fetch_camera_frames(),
-            backend.start_log_broadcaster(),
-            asyncio.Future(),   # keeps the server alive forever
-        )
+        try:
+            await asyncio.gather(
+                # backend.fetch_camera_frames(),
+                asyncio.Future(),
+            )
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            backend.save_map()
+            backend.occ_grid.save()
+            print("[MAP] Map and occupancy grid saved on shutdown.")
 
 
 if __name__ == "__main__":
