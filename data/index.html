@@ -756,7 +756,7 @@
 
       if (shouldDraw()) drawMap();
     }
-
+/*
     function pruneStaleGhostPoints(sensorX, sensorY, newHits) {
       const PERP_TOLERANCE_MM = 40; // how close to the beam line counts as "on this ray"
       const MARGIN_MM = 30;         // don't prune points essentially AT the new hit itself
@@ -780,7 +780,7 @@
         });
       }
     }
-
+*/
     // Full ToF sweep batch — one message per completed sweep of the servo
     function handleScanSweep(d) {
       const rx = parseFloat(d.x);
@@ -800,12 +800,12 @@
           points.push({
             x: rx + dist * Math.cos(worldAngle),
             y: ry + dist * Math.sin(worldAngle),
-            dist: dist, worldAngle: worldAngle
+            //dist: dist, worldAngle: worldAngle
           });
         }
       });
 
-      pruneStaleGhostPoints(rx, ry, points); 
+      // pruneStaleGhostPoints(rx, ry, points); 
 
       sweepGenCounter++;
       sweepHistory.push({ points, gen: sweepGenCounter });

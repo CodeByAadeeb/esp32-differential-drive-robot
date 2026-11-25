@@ -59,8 +59,8 @@ MIN_INLIER_COUNT = 8
 MIN_INLIER_RATIO = 0.30 # was 0.5
 
 # Odometry-proximity + ToF scan-matching loop closure (fallback when camera doesn't confirm).
-ODOM_PROXIMITY_RADIUS_MM = 500.0 #800.0
-SCAN_LOOP_SKIP_RECENT = 5 # 10
+ODOM_PROXIMITY_RADIUS_MM = 800.0 #800.0
+SCAN_LOOP_SKIP_RECENT = 15 # 10
 SCAN_MIN_RANGE_MM = 20.0
 SCAN_MAX_RANGE_MM = 1000.0
 SCAN_MATCH_SEARCH_XY_MM = 300.0
@@ -853,8 +853,6 @@ class ScanManager:
         """Serialize all scan nodes with corrected poses and world-frame points to JSON."""
         data = []
         for s in self.scans:
-            if not s.raw_sweep:  # skip turn nodes — no scan data to save
-                continue
             entry = {
                 "id": s.id,
                 "corrected_pose": s.corrected_pose,
@@ -868,20 +866,40 @@ class ScanManager:
         print(f"[MAP] Saved {len(data)} scan nodes to {filepath}")
 
     def load_map(self, filepath: str = MAP_FILE):
-        """Load a previously saved map. Restores scan nodes but NOT the GTSAM graph."""
         if not os.path.exists(filepath):
             print(f"[MAP] No map file found at {filepath}")
             return False
         with open(filepath, "r") as f:
             data = json.load(f)
+
         self.scans.clear()
+        self.slam_graph.reset()
+
+        prev_scan = None
+        seen_ids = set()
         for entry in data:
+            if entry["id"] in seen_ids:
+                print(f"⚠️ [MAP] Skipping duplicate id {entry['id']} in {filepath} (from before the id-collision fix).")
+                continue
+            seen_ids.add(entry["id"])
+
             sf = ScanFrame(entry["id"], entry["raw_sweep"], entry["corrected_pose"])
-            sf.corrected_pose       = entry["corrected_pose"]
+            sf.corrected_pose = entry["corrected_pose"]
             sf.corrected_scan_points = entry.get("corrected_scan_points", [])
             self.scans.append(sf)
-        print(f"[MAP] Loaded {len(self.scans)} scan nodes from {filepath}")
+
+            if prev_scan is None:
+                self.slam_graph.add_node(sf.id, sf.corrected_pose, is_prior=True)
+            else:
+                self.slam_graph.add_node(sf.id, sf.corrected_pose)
+                self.slam_graph.add_odom_fac(prev_scan.id, sf.id, prev_scan.corrected_pose, sf.corrected_pose)
+            prev_scan = sf
+
+        print(f"[MAP] Loaded {len(self.scans)} scan nodes and rebuilt graph from {filepath}")
         return True
+
+    def next_id(self) -> int:
+        return max((s.id for s in self.scans), default=-1) + 1
 
     def add_graph_node(self, scan: ScanFrame, prev_scan: Optional[ScanFrame]):
         self.scans.append(scan)
@@ -900,6 +918,10 @@ class ScanManager:
         pool = self.scans[:-exclude_last_n] if exclude_last_n > 0 else self.scans
         for scan in pool:
             if not scan.raw_sweep:  # skip turn nodes
+                continue
+            # Skip scans that are too close in traveled distance (not just excluded by index)
+            dist_traveled = abs(scan.pose_at_capture.get("dist", 0) - current_pose.get("dist", 0))
+            if dist_traveled < 500.0:  # must be at least 1m of travel apart
                 continue
             dx = current_pose["x"] - scan.pose_at_capture["x"]
             dy = current_pose["y"] - scan.pose_at_capture["y"]
@@ -980,7 +1002,7 @@ class RobotBackend:
                     2.0, 
                     lambda: asyncio.ensure_future(self._broadcast_trajectory(None, None, source="loaded"))
                 )
-                print(f"[MAP] Resuming with {len(self.tof_scans.scans)} previously mapped scan nodes")
+                print(f"[MAP] Resuming with {self.tof_scans.next_id()} previously mapped scan nodes")
 
     def set_mode(self, mode: OdometryMode): # --- doubt --- who is calling this function in this code right now?
         self.odometry.set_mode(mode)
@@ -1000,7 +1022,7 @@ class RobotBackend:
             # 🟢 2. ONLY create a ToF ScanFrame when a fresh ESP32 sweep JSON has arrived
             new_scan_candidate = None
             if self.has_new_sweep and self.latest_raw_sweep:
-                candidate_id = len(self.tof_scans.scans)
+                candidate_id = self.tof_scans.next_id()
                 new_scan_candidate = ScanFrame(candidate_id, self.latest_raw_sweep, pose)
                 
                 # FLUSH BUFFER: Prevent driving straight from re-using this sweep
@@ -1047,6 +1069,17 @@ class RobotBackend:
                             print(f"✅ ToF trajectory corrected via graph optimization (source={loop['source']}).")
                             await self._broadcast_trajectory(new_scan_candidate.id, loop["matched_kf_id"], source="tof")
 
+                            # Rebuild occupancy grid from all corrected scan points
+                            self.occ_grid.log_odds[:] = 0.0  # reset grid
+                            for stored_scan in self.tof_scans.scans:
+                                if stored_scan.corrected_scan_points and stored_scan.corrected_pose:
+                                    self.occ_grid.update(
+                                        stored_scan.corrected_pose["x"],
+                                        stored_scan.corrected_pose["y"],
+                                        stored_scan.corrected_scan_points
+                                    )
+                            await self._broadcast_grid()
+
             # Turn node — create odometry-only graph node when robot rotates significantly
             # without a new scan (captures turns that happen between scan stops)
             new_scan_this_tick = new_scan_candidate is not None
@@ -1075,7 +1108,7 @@ class RobotBackend:
                                     curr_pos[1] - self._last_turn_pos[1]) < 50.0
                         )
                         if not too_close:
-                            turn_id = len(self.tof_scans.scans)
+                            turn_id = self.tof_scans.next_id()
                             turn_node = ScanFrame(turn_id, [], pose)
                             self.tof_scans.add_graph_node(turn_node, self.tof_scans.scans[-1])
                             self._last_turn_theta_deg = current_theta_deg
@@ -1140,16 +1173,6 @@ class RobotBackend:
             self.latest_raw_sweep = data.get("measure", [])
             self.has_new_sweep = True  # 🟢 MARK SWEEP AS FRESH
             self.latest_scan_points = scan_to_world_points(pose_rad, data.get("measure", []))
-            # Update occupancy grid with this sweep
-            if self.latest_scan_points:
-                self.occ_grid.update(
-                    pose_rad["x"], pose_rad["y"],
-                    self.latest_scan_points
-                )
-                self._grid_broadcast_counter += 1
-                # Broadcast grid to browser every 3 scans (not every scan — expensive)
-                if self._grid_broadcast_counter % 3 == 0:
-                    await self._broadcast_grid()
 
             if self.browser_clients:
                 data["x"] = pose_rad["x"]
